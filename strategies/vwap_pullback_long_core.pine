@@ -13,8 +13,8 @@
 //   any future strategy module can reuse:
 //     - a shared StrategyState type (each module owns one persistent
 //       instance, so no two modules can ever read/write each other's state)
-//     - a shared `activeStrategyId` marker recording which module currently
-//       owns the single open position allowed system-wide
+//     - a shared `sharedRuntime.activeId` marker recording which module
+//       currently owns the single open position allowed system-wide
 //     - shared utility functions (symbol filter, backtest date range,
 //       position sizing math, stop-buffer math, ET day/time helpers)
 //   Each strategy module (VWAP Pullback Long today; more later) is fully
@@ -60,7 +60,7 @@
 // editing the script.
 strategy(
      "Trading System - Intraday Long Framework",
-     shorttitle              = "Intraday Long Framework",
+     shorttitle              = "VWAPPBLong",
      overlay                  = true,
      pyramiding               = 0,
      initial_capital           = 5000,      // keep in sync with each module's own bankroll input (see docs)
@@ -114,6 +114,15 @@ type StrategyState
     float  dayRealizedPnL        = 0.0
     bool   dayHitBigWin          = false
     int    prevClosedTradesCount = 0
+    // Chart-marker signals: true only on the bar the event fires. Pine does
+    // not allow a function to reassign a plain global scalar it only sees
+    // via closure - only fields of a reference type (this UDT) it was
+    // handed as a parameter - so these live on the state object instead of
+    // as bare `vwapPB_xSignal` globals, and are explicitly zeroed each bar.
+    bool   impulseMarkerSignal      = false
+    bool   pullbackMarkerSignal     = false
+    bool   confirmationMarkerSignal = false
+    bool   entrySignal              = false
 
 // =============================================================================
 // SHARED RUNTIME STATE
@@ -123,7 +132,14 @@ type StrategyState
 // allowed system-wide. na when flat. Every module must check this (via
 // canOpenNewPosition() / its own id comparison) before managing a position,
 // so modules never step on each other's trades.
-var string activeStrategyId = na
+// Wrapped in a tiny UDT (a reference type) for the same reason as the
+// marker signals above: a plain `var string` cannot be reassigned from
+// inside a function even via closure, but a field of an object handed to
+// (or, for a single global like this, simply visible to) a function can be.
+type SharedRuntime
+    string activeId = na
+
+var SharedRuntime sharedRuntime = SharedRuntime.new()
 
 // =============================================================================
 // SHARED UTILITY FUNCTIONS (usable by any strategy module)
@@ -288,14 +304,14 @@ vwapPB_canTradeToday(state) =>
     state.dayClosedTrades < vwapPB_maxTradesPerDayInput and state.dayLosingTrades < vwapPB_maxLosingTradesPerDayInput and state.dayRealizedPnL > -vwapPB_maxDailyLossDollarsInput and not state.dayHitBigWin
 
 // --- Trade execution -----------------------------------------------------
-vwapPB_executeEntry(state, entryPx, stopPx, targetPx, shares) =>
+vwapPB_executeEntry(state, runtime, entryPx, stopPx, targetPx, shares) =>
     state.entryPrice      := entryPx
     state.stopPrice        := stopPx
     state.targetPrice      := targetPx
     state.lastRiskDollars  := (entryPx - stopPx) * shares
     strategy.entry(state.id, strategy.long, qty = shares)
     strategy.exit(state.id + "Exit", from_entry = state.id, stop = stopPx, limit = targetPx)
-    activeStrategyId := state.id
+    runtime.activeId := state.id
     state.setupStage := 4
 
 // --- Setup reset -----------------------------------------------------------
@@ -341,12 +357,12 @@ vwapPB_updateDailyStats(state) =>
         state.prevClosedTradesCount := strategy.closedtrades
 
 // --- Exit / session management -----------------------------------------------
-vwapPB_manageExit(state, forceCloseTime) =>
-    if strategy.position_size > 0 and activeStrategyId == state.id and forceCloseTime
+vwapPB_manageExit(state, runtime, forceCloseTime) =>
+    if strategy.position_size > 0 and runtime.activeId == state.id and forceCloseTime
         strategy.close(state.id, comment = "Force Close (Window End)")
-    if activeStrategyId == state.id and strategy.position_size == 0
+    if runtime.activeId == state.id and strategy.position_size == 0
         vwapPB_resetSetup(state)
-        activeStrategyId := na
+        runtime.activeId := na
 
 // --- Debug helpers (read-only; never influence trading logic) ----------------
 // Human-readable label for the raw setup-stage number.
@@ -373,101 +389,110 @@ vwapPB_dailyLockoutReason(state) =>
         reason := "Max Trades Per Day (" + str.tostring(state.dayClosedTrades) + ")"
     reason
 
-// --- Reporting signal flags (chart markers only; recomputed every bar) -------
-vwapPB_impulseMarkerSignal      = false
-vwapPB_pullbackMarkerSignal     = false
-vwapPB_confirmationMarkerSignal = false
-vwapPB_entrySignal              = false
-
 // --- Module driver: ties the whole pipeline together for one bar -------------
-runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
-    // Book-keeping (daily reset, exit handling, stats) always runs, even if
-    // the module is disabled, so an already-open trade is never abandoned.
-    vwapPB_manageDailyReset(state)
-    forceCloseTime = etMinutesOfDay() >= vwapPB_windowEndMin
-    vwapPB_manageExit(state, forceCloseTime)
-    vwapPB_updateDailyStats(state)
+// Called unconditionally, every bar (see MAIN EXECUTION below) - the
+// confirmed-bar gate lives INSIDE the function instead of at its call site.
+// Pine flags conditionally-invoked function calls (CW10003) as an
+// inconsistency risk; moving the gate inside satisfies that while behaving
+// identically, since the body only ever does anything when isConfirmed.
+runVwapPullbackLong(state, runtime, allowedSymbol, dateRangeOK, isConfirmed) =>
+    if isConfirmed
+        // Reporting signals reset every confirmed bar; the state machine
+        // below sets the relevant one true only on the bar its event fires.
+        state.impulseMarkerSignal      := false
+        state.pullbackMarkerSignal     := false
+        state.confirmationMarkerSignal := false
+        state.entrySignal              := false
 
-    if forceCloseTime and state.setupStage != 4
-        vwapPB_resetSetup(state)
+        // Book-keeping (daily reset, exit handling, stats) always runs, even
+        // if the module is disabled, so an already-open trade is never
+        // abandoned.
+        vwapPB_manageDailyReset(state)
+        forceCloseTime = etMinutesOfDay() >= vwapPB_windowEndMin
+        vwapPB_manageExit(state, runtime, forceCloseTime)
+        vwapPB_updateDailyStats(state)
 
-    // Scanning is also gated on "not forceCloseTime": without this, a setup
-    // reset by the line above could immediately re-advance from stage 0 to
-    // stage 1 later in this same bar's pass through the chain below (if
-    // trendOK happened to be true), then get reset again next bar, forever
-    // flickering for the rest of the day instead of staying idle. No trade
-    // could ever result from this (entryWindow below is already false), but
-    // the flicker is real state churn and would be misleading in the debug
-    // panel, so scanning is simply switched off once the window has closed.
-    if vwapPB_enableInput and not forceCloseTime
-        trendOK = vwapPB_detectTrend(vwapPB_vwapVal, vwapPB_vwapVal[1], vwapPB_ema9Val, vwapPB_ema20Val)
+        if forceCloseTime and state.setupStage != 4
+            vwapPB_resetSetup(state)
 
-        if state.setupStage == 0
-            if trendOK
-                state.setupStage := 1
+        // Scanning is also gated on "not forceCloseTime": without this, a
+        // setup reset by the line above could immediately re-advance from
+        // stage 0 to stage 1 later in this same bar's pass through the
+        // chain below (if trendOK happened to be true), then get reset
+        // again next bar, forever flickering for the rest of the day
+        // instead of staying idle. No trade could ever result from this
+        // (entryWindow below is already false), but the flicker is real
+        // state churn and would be misleading in the debug panel, so
+        // scanning is simply switched off once the window has closed.
+        if vwapPB_enableInput and not forceCloseTime
+            trendOK = vwapPB_detectTrend(vwapPB_vwapVal, vwapPB_vwapVal[1], vwapPB_ema9Val, vwapPB_ema20Val)
 
-        else if state.setupStage == 1
-            if not trendOK
-                vwapPB_resetSetup(state)
-            else
-                if vwapPB_detectImpulse(vwapPB_vwapVal, vwapPB_atrVal)
-                    state.impulseHigh   := high
-                    state.impulseBarIdx := bar_index
-                    state.pullbackLow   := na
-                    state.pullbackValid := false
-                    vwapPB_impulseMarkerSignal := true
-                    state.setupStage := 2
+            if state.setupStage == 0
+                if trendOK
+                    state.setupStage := 1
 
-        else if state.setupStage == 2
-            // Expiration window 1: the pullback itself must occur within
-            // vwapPB_pullbackMaxBarsInput bars of the qualifying impulse.
-            barsSinceImpulse = bar_index - state.impulseBarIdx
-            [isInvalid2, invalidReason2] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
-            if barsSinceImpulse > vwapPB_pullbackMaxBarsInput
-                vwapPB_resetSetup(state)
-            else if isInvalid2
-                state.lastInvalidationReason := invalidReason2
-                vwapPB_resetSetup(state)
-            else
-                if vwapPB_detectPullback(vwapPB_vwapVal)
-                    state.pullbackLow    := low
-                    state.pullbackValid  := true
-                    state.pullbackBarIdx := bar_index
-                    vwapPB_pullbackMarkerSignal := true
-                    state.setupStage := 3
+            else if state.setupStage == 1
+                if not trendOK
+                    vwapPB_resetSetup(state)
+                else
+                    if vwapPB_detectImpulse(vwapPB_vwapVal, vwapPB_atrVal)
+                        state.impulseHigh   := high
+                        state.impulseBarIdx := bar_index
+                        state.pullbackLow   := na
+                        state.pullbackValid := false
+                        state.impulseMarkerSignal := true
+                        state.setupStage := 2
 
-        else if state.setupStage == 3
-            state.pullbackLow := math.min(state.pullbackLow, low)
-            // Expiration window 2: separate and independent from the
-            // pullback window above - confirmation must occur within
-            // vwapPB_confirmationMaxBarsInput bars of the qualifying pullback.
-            barsSincePullback = bar_index - state.pullbackBarIdx
-            [isInvalid3, invalidReason3] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
-            if barsSincePullback > vwapPB_confirmationMaxBarsInput
-                vwapPB_resetSetup(state)
-            else if isInvalid3
-                state.lastInvalidationReason := invalidReason3
-                vwapPB_resetSetup(state)
-            else
-                if vwapPB_checkConfirmation(vwapPB_vwapVal)
-                    vwapPB_confirmationMarkerSignal := true
+            else if state.setupStage == 2
+                // Expiration window 1: the pullback itself must occur within
+                // vwapPB_pullbackMaxBarsInput bars of the qualifying impulse.
+                barsSinceImpulse = bar_index - state.impulseBarIdx
+                [isInvalid2, invalidReason2] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
+                if barsSinceImpulse > vwapPB_pullbackMaxBarsInput
+                    vwapPB_resetSetup(state)
+                else if isInvalid2
+                    state.lastInvalidationReason := invalidReason2
+                    vwapPB_resetSetup(state)
+                else
+                    if vwapPB_detectPullback(vwapPB_vwapVal)
+                        state.pullbackLow    := low
+                        state.pullbackValid  := true
+                        state.pullbackBarIdx := bar_index
+                        state.pullbackMarkerSignal := true
+                        state.setupStage := 3
 
-                    candidateEntryPrice = close
-                    [candidateStop, candidateRisk, riskValid] = vwapPB_calcStop(state.pullbackLow, candidateEntryPrice)
+            else if state.setupStage == 3
+                state.pullbackLow := math.min(state.pullbackLow, low)
+                // Expiration window 2: separate and independent from the
+                // pullback window above - confirmation must occur within
+                // vwapPB_confirmationMaxBarsInput bars of the qualifying pullback.
+                barsSincePullback = bar_index - state.pullbackBarIdx
+                [isInvalid3, invalidReason3] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
+                if barsSincePullback > vwapPB_confirmationMaxBarsInput
+                    vwapPB_resetSetup(state)
+                else if isInvalid3
+                    state.lastInvalidationReason := invalidReason3
+                    vwapPB_resetSetup(state)
+                else
+                    if vwapPB_checkConfirmation(vwapPB_vwapVal)
+                        state.confirmationMarkerSignal := true
 
-                    entryWindow    = etMinutesOfDay() >= vwapPB_windowStartMin and etMinutesOfDay() < vwapPB_windowEndMin
-                    allowedToTrade = allowedSymbol and timeframe.isintraday and entryWindow and dateRangeOK and vwapPB_canTradeToday(state) and canOpenNewPosition()
+                        candidateEntryPrice = close
+                        [candidateStop, candidateRisk, riskValid] = vwapPB_calcStop(state.pullbackLow, candidateEntryPrice)
 
-                    if riskValid and allowedToTrade
-                        shares = calcPositionSize(candidateEntryPrice, candidateRisk, vwapPB_maxRiskDollarsInput, vwapPB_maxTradeValueInput)
-                        if shares >= 1
-                            targetPx = vwapPB_calcTarget(candidateEntryPrice, candidateRisk)
-                            vwapPB_executeEntry(state, candidateEntryPrice, candidateStop, targetPx, shares)
-                            vwapPB_entrySignal := true
+                        entryWindow    = etMinutesOfDay() >= vwapPB_windowStartMin and etMinutesOfDay() < vwapPB_windowEndMin
+                        allowedToTrade = allowedSymbol and timeframe.isintraday and entryWindow and dateRangeOK and vwapPB_canTradeToday(state) and canOpenNewPosition()
+
+                        if riskValid and allowedToTrade
+                            shares = calcPositionSize(candidateEntryPrice, candidateRisk, vwapPB_maxRiskDollarsInput, vwapPB_maxTradeValueInput)
+                            if shares >= 1
+                                targetPx = vwapPB_calcTarget(candidateEntryPrice, candidateRisk)
+                                vwapPB_executeEntry(state, runtime, candidateEntryPrice, candidateStop, targetPx, shares)
+                                state.entrySignal := true
+                            else
+                                vwapPB_resetSetup(state)
                         else
                             vwapPB_resetSetup(state)
-                    else
-                        vwapPB_resetSetup(state)
 
 // =============================================================================
 // FUTURE STRATEGY MODULES
@@ -485,28 +510,45 @@ runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
 //      mirroring the vwapPB_* functions above. Reuse the shared utilities
 //      (isAllowedSymbol, inBacktestRange, canOpenNewPosition,
 //      calcPositionSize, minStopBuffer, etMinutesOfDay, etDayId) instead of
-//      duplicating them.
-//   5. Write a runMyStrategy(state, allowedSymbol, dateRangeOK) driver
-//      function following the same shape as runVwapPullbackLong above, and
-//      call it from the MAIN EXECUTION block below.
-//   6. Add its own plot()/plotshape() calls in its own "Visuals" block.
+//      duplicating them. Any function that needs to WRITE to
+//      sharedRuntime.activeId (only entry/exit management should) must
+//      receive `runtime` as an explicit parameter, same as `state` - Pine
+//      does not allow reassigning a field through a variable seen only via
+//      closure from inside a function in every Pine version, only through
+//      one passed in as a parameter, so don't rely on closure access for
+//      any `:=` write, only for reads.
+//   5. Write a runMyStrategy(state, runtime, allowedSymbol, dateRangeOK,
+//      isConfirmed) driver function following the same shape as
+//      runVwapPullbackLong above - gate its entire body on `isConfirmed`
+//      internally rather than wrapping its call site in
+//      `if barstate.isconfirmed`, then call it unconditionally every bar
+//      from the MAIN EXECUTION block below, passing sharedRuntime and
+//      barstate.isconfirmed through.
+//   6. Add its own plot()/plotshape() calls in its own "Visuals" block,
+//      reading signal fields off its own state object (see
+//      StrategyState.impulseMarkerSignal etc. for the pattern) rather than
+//      bare globals, for the same reason as point 4.
 // Because every module reads/writes only its own StrategyState instance and
 // filters strategy.closedtrades by its own unique id, this can be done
 // without any risk of interfering with VWAP Pullback Long's state, daily
 // counters, or trades - the only shared resource is the single open-position
-// slot (activeStrategyId / canOpenNewPosition()), by design.
+// slot (sharedRuntime.activeId / canOpenNewPosition()), by design.
 // =============================================================================
 
 // =============================================================================
-// MAIN EXECUTION - confirmed bars only (no repainting, no lookahead)
+// MAIN EXECUTION
+//
+// Driver functions are called unconditionally, every bar - each one gates
+// its own body internally on barstate.isconfirmed (passed in below), which
+// is what "confirmed bars only / no repainting / no lookahead" actually
+// requires, without triggering Pine's conditional-call-site warning.
 // =============================================================================
 
-if barstate.isconfirmed
-    allowedSymbol = isAllowedSymbol(allowOtherSymbolsInput)
-    dateRangeOK   = inBacktestRange(startDateInput, endDateInput)
+allowedSymbol = isAllowedSymbol(allowOtherSymbolsInput)
+dateRangeOK   = inBacktestRange(startDateInput, endDateInput)
 
-    runVwapPullbackLong(vwapPBState, allowedSymbol, dateRangeOK)
-    // Future modules: runMyStrategy(myStrategyState, allowedSymbol, dateRangeOK)
+runVwapPullbackLong(vwapPBState, sharedRuntime, allowedSymbol, dateRangeOK, barstate.isconfirmed)
+// Future modules: runMyStrategy(myStrategyState, sharedRuntime, allowedSymbol, dateRangeOK, barstate.isconfirmed)
 
 // =============================================================================
 // WARNINGS (shared)
@@ -528,14 +570,14 @@ plot(vwapPB_vwapVal,  title = "VWAP Pullback Long: Session VWAP", color = color.
 plot(vwapPB_ema9Val,  title = "VWAP Pullback Long: 9 EMA",        color = color.new(color.orange, 0), linewidth = 1)
 plot(vwapPB_ema20Val, title = "VWAP Pullback Long: 20 EMA",       color = color.new(color.purple, 0), linewidth = 1)
 
-vwapPB_ownsPosition = strategy.position_size > 0 and activeStrategyId == vwapPBState.id
+vwapPB_ownsPosition = strategy.position_size > 0 and sharedRuntime.activeId == vwapPBState.id
 plot(vwapPB_ownsPosition ? vwapPBState.stopPrice   : na, title = "VWAP Pullback Long: Stop Loss",     color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 1)
 plot(vwapPB_ownsPosition ? vwapPBState.targetPrice : na, title = "VWAP Pullback Long: Profit Target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
 
-plotshape(vwapPB_impulseMarkerSignal,      title = "VWAP Pullback Long: Impulse",      style = shape.circle,      location = location.abovebar, color = color.new(color.aqua, 0),   size = size.tiny)
-plotshape(vwapPB_pullbackMarkerSignal,     title = "VWAP Pullback Long: Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
-plotshape(vwapPB_confirmationMarkerSignal, title = "VWAP Pullback Long: Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0),   size = size.tiny)
-plotshape(vwapPB_entrySignal,              title = "VWAP Pullback Long: Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0),   size = size.small)
+plotshape(vwapPBState.impulseMarkerSignal,      title = "VWAP Pullback Long: Impulse",      style = shape.circle,      location = location.abovebar, color = color.new(color.aqua, 0),   size = size.tiny)
+plotshape(vwapPBState.pullbackMarkerSignal,     title = "VWAP Pullback Long: Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
+plotshape(vwapPBState.confirmationMarkerSignal, title = "VWAP Pullback Long: Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0),   size = size.tiny)
+plotshape(vwapPBState.entrySignal,              title = "VWAP Pullback Long: Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0),   size = size.small)
 
 // =============================================================================
 // MODULE: VWAP Pullback Long - DEBUG VISUALS (temporary, for testing only)
