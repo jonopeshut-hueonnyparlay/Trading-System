@@ -50,6 +50,42 @@ comment block near the bottom of the script for the exact steps to add one
 (unique setup id, its own `StrategyState` instance, its own inputs/functions/
 driver/visuals) without modifying any VWAP Pullback Long code.
 
+### Pre-test audit findings (fixed)
+
+A final audit before testing found and fixed three definite Pine-specific
+bugs. No entry, stop, target, sizing, session, or daily-risk rule changed —
+these are state-management/runtime-correctness fixes only:
+
+1. **Stateful `ta.*` calls were being made conditionally.** `ta.falling()`
+   and `ta.crossunder()` (used by the invalidation check) were called from
+   inside a function that only ran while `setupStage` was 2 or 3. Pine's
+   history-dependent built-ins key their internal "previous value" to how
+   many times *that call site* has executed, not to the chart's actual bar
+   sequence — calling them conditionally means "previous bar" silently
+   means "the last bar this branch happened to run," which would have
+   produced wrong falling/crossunder signals whenever a setup wasn't
+   currently being tracked. Fixed by computing both unconditionally, once
+   per bar, in the Indicators section, and only *consuming* the resulting
+   booleans conditionally inside the state machine.
+2. **Post-window setup-stage flicker.** The session-end guard reset the
+   setup stage to 0 whenever `forceCloseTime` was true, but the state
+   machine's scanning chain ran immediately afterward in the same bar pass
+   and could re-advance stage 0 → 1 right away if trend conditions were
+   met — repeating every bar for the rest of the day. No trade could ever
+   result (the entry-window check always fails after the window closes),
+   but the setup stage would misleadingly flicker between 0 and 1 all
+   afternoon. Fixed by also gating the scanning chain on `not
+   forceCloseTime`, so scanning genuinely stops for the day once the
+   window closes.
+3. **New-day reset could desync an open position.** The daily counter
+   reset called the generic setup-reset unconditionally, without the same
+   "don't touch an active trade" guard the session-end reset already had.
+   In the practically-impossible case a position were still open across an
+   Eastern Time day boundary (the force-close mechanism makes this
+   essentially unreachable in normal use), the setup stage would have been
+   wiped to 0 while a real position was still open. Fixed by applying the
+   same `setupStage != 4` guard used elsewhere.
+
 ## 1. The code
 
 See [`vwap_pullback_long_core.pine`](./vwap_pullback_long_core.pine) in this
@@ -255,10 +291,12 @@ still open at 11:15 AM ET is force-closed at market.
 - [x] No `request.security()` / higher-timeframe calls anywhere in the
       script — eliminates the entire class of daily-high/low-before-it-
       happened lookahead bugs.
-- [x] Session VWAP, EMAs, and ATR are all standard non-repainting Pine
-      built-ins (`ta.vwap`, `ta.ema`, `ta.atr`), and the invalidation checks
-      (`ta.falling`, `ta.crossunder`) are likewise standard non-repainting
-      built-ins — all computed causally bar by bar.
+- [x] Session VWAP, EMAs, ATR, and the invalidation checks (`ta.falling`,
+      `ta.crossunder`) are all standard non-repainting Pine built-ins, and
+      all five are called unconditionally once per bar (see Pre-test audit
+      findings above) so their internal history always lines up with actual
+      chart bars rather than with how often a conditional branch happened
+      to run.
 - [x] All session/timezone comparisons use the bar's own `time` value
       converted with an explicit `"America/New_York"` timezone argument —
       never the chart's display timezone, and never a future bar's time.
@@ -274,3 +312,55 @@ still open at 11:15 AM ET is force-closed at market.
 - [x] `calc_on_every_tick = false` — historical and realtime bars are
       processed identically (once per confirmed bar), so backtest results
       are not an artifact of intrabar recalculation.
+
+## 8. Debug mode (temporary, for testing)
+
+The script includes an optional diagnostic layer, off by default, for
+verifying the state machine behaves as documented before you trust backtest
+results. It is purely read-only — it never influences any trading decision —
+and is safe to leave in place (or delete) once you're done testing.
+
+**To enable it:** open the strategy's **Settings → Inputs** tab, find
+**Enable Debug Visuals (temporary, for testing)** under the "VWAP Pullback
+Long: Debug" group, and turn it on.
+
+**What you get:**
+
+- Five extra series visible only in the **Data Window** (not drawn on the
+  chart itself, so they don't clutter the price pane), scrubbable bar by
+  bar through history:
+  - **Debug: State Number** — the raw `setupStage` value (0–4) for that bar.
+  - **Debug: Impulse Bar Index** — the `bar_index` of the current setup's
+    qualifying impulse bar, or blank if no impulse is being tracked.
+  - **Debug: Pullback Bar Index** — the `bar_index` of the current setup's
+    qualifying pullback bar, or blank if none yet.
+  - **Debug: Bars Since Impulse** / **Debug: Bars Since Pullback** — live
+    counters against the two expiration windows (15 and 5 bars by default);
+    use these to confirm a setup expires on the correct bar and not one off.
+- A small **"VWAP Pullback Long - DEBUG"** table in the bottom-right corner
+  of the chart, refreshed on the most recent bar, showing:
+  - **State** — the stage number with a human-readable label (e.g. "2:
+    Waiting Pullback").
+  - **Impulse Bar Index** / **Pullback Bar Index** / **Bars Since Impulse**
+    / **Bars Since Pullback** — the same values as the Data Window series,
+    for a quick at-a-glance snapshot without opening the Data Window.
+  - **Last Invalidation Reason** — which of the three post-impulse
+    invalidation conditions (VWAP Falling / EMA Cross Down / Material VWAP
+    Break) most recently killed a setup. This persists after the reset (it
+    is not cleared back to "N/A" until the *next* invalidation), specifically
+    so you can see why a setup that just disappeared was killed, since by
+    the time the table redraws the stage has already gone back to 0.
+  - **Daily Lockout Reason** — which daily circuit breaker, if any, is
+    currently blocking new entries for the rest of the trading day ("Big
+    Win Reached", "Max Losing Trades", "Max Daily Loss", "Max Trades Per
+    Day", or "None").
+
+**Suggested use:** step through a handful of days on a 1-minute SPY/QQQ
+chart with debug visuals on, and confirm: the state number advances exactly
+one stage at a time and never skips; impulse/pullback bar indices only
+change on bars where the corresponding chart marker appears; the bars-since
+counters reset to blank immediately after an entry, invalidation, or
+expiration; and the daily lockout reason appears exactly on the day/bar you'd
+expect given the trade log. Turn the input back off (or leave it off) for
+actual backtesting runs — it adds a small amount of per-bar overhead and
+visual clutter you don't need once you trust the logic.

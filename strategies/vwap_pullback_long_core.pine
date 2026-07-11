@@ -92,6 +92,7 @@ type StrategyState
     float  pullbackLow           = na
     bool   pullbackValid         = false
     int    pullbackBarIdx        = na
+    string lastInvalidationReason = "N/A"
     float  entryPrice            = na
     float  stopPrice             = na
     float  targetPrice           = na
@@ -188,6 +189,10 @@ vwapPB_maxTradesPerDayInput       = input.int(2,  "Max Trades Per Day",         
 vwapPB_maxLosingTradesPerDayInput = input.int(2,  "Max Losing Trades Per Day",     minval = 1, group = "VWAP Pullback Long: Daily Limits")
 vwapPB_maxDailyLossDollarsInput   = input.float(50, "Max Daily Realized Loss ($)", minval = 1, group = "VWAP Pullback Long: Daily Limits")
 
+// Temporary pre-test diagnostics only - never affects trading logic, never
+// reads anything the strategy doesn't already compute. Off by default.
+vwapPB_debugEnableInput = input.bool(false, "Enable Debug Visuals (temporary, for testing)", group = "VWAP Pullback Long: Debug")
+
 vwapPB_windowStartMin = vwapPB_entryStartHourInput * 60 + vwapPB_entryStartMinuteInput
 vwapPB_windowEndMin   = vwapPB_entryEndHourInput * 60 + vwapPB_entryEndMinuteInput
 
@@ -199,6 +204,15 @@ vwapPB_vwapVal  = ta.vwap(hlc3)
 vwapPB_ema9Val  = ta.ema(close, vwapPB_ema9LenInput)
 vwapPB_ema20Val = ta.ema(close, vwapPB_ema20LenInput)
 vwapPB_atrVal   = ta.atr(vwapPB_atrLenInput)
+
+// ta.falling()/ta.crossunder() maintain internal history keyed to their own
+// CALL SITE, not to the chart's bar index - if called only from inside a
+// conditional branch (e.g. only while setupStage is 2/3), their "previous
+// bar" is actually "the last bar this branch happened to run," which is
+// wrong. They are therefore evaluated here, unconditionally, every bar, and
+// only the resulting booleans are consumed conditionally below.
+vwapPB_vwapFallingNow  = ta.falling(vwapPB_vwapVal, vwapPB_vwapFallingBarsInput)
+vwapPB_emaCrossDownNow = ta.crossunder(vwapPB_ema9Val, vwapPB_ema20Val)
 
 // --- Trend detection ------------------------------------------------------
 vwapPB_detectTrend(vwapVal, vwapPrev, ema9Val, ema20Val) =>
@@ -220,11 +234,23 @@ vwapPB_detectPullback(vwapVal) =>
 //   - VWAP is clearly falling (a configurable consecutive down-bar streak)
 //   - the 9 EMA crosses below the 20 EMA
 //   - price closes below the configurable material-VWAP-break threshold
-vwapPB_isInvalidated(vwapVal, ema9Val, ema20Val) =>
-    vwapFalling   = ta.falling(vwapVal, vwapPB_vwapFallingBarsInput)
-    emaCrossDown  = ta.crossunder(ema9Val, ema20Val)
+// vwapFallingNow / emaCrossDownNow must be pre-computed unconditionally
+// (see Indicators section above) and simply passed in here. Returns
+// [isInvalid, reason] so the caller can both act on it and record why.
+vwapPB_isInvalidated(vwapVal, vwapFallingNow, emaCrossDownNow) =>
     materialBreak = close <= vwapVal * (1 - vwapPB_invalidationPctInput / 100)
-    vwapFalling or emaCrossDown or materialBreak
+    reason  = "None"
+    invalid = false
+    if vwapFallingNow
+        reason  := "VWAP Falling"
+        invalid := true
+    else if emaCrossDownNow
+        reason  := "EMA Cross Down"
+        invalid := true
+    else if materialBreak
+        reason  := "Material VWAP Break"
+        invalid := true
+    [invalid, reason]
 
 // --- Confirmation / entry trigger --------------------------------------------
 vwapPB_checkConfirmation(vwapVal) =>
@@ -278,7 +304,13 @@ vwapPB_manageDailyReset(state) =>
         state.dayLosingTrades := 0
         state.dayRealizedPnL  := 0.0
         state.dayHitBigWin    := false
-        vwapPB_resetSetup(state)
+        // Daily counters always reset at the day boundary, but the setup
+        // machine itself is only reset if no trade is active - mirrors the
+        // same guard used by the session-end reset, so a still-open
+        // position (e.g. an unexpected multi-day gap) can never be desynced
+        // from strategy.position_size by this reset.
+        if state.setupStage != 4
+            vwapPB_resetSetup(state)
         state.lastDayId := today
 
 // --- Closed-trade accounting -------------------------------------------------
@@ -305,6 +337,31 @@ vwapPB_manageExit(state, forceCloseTime) =>
         vwapPB_resetSetup(state)
         activeStrategyId := na
 
+// --- Debug helpers (read-only; never influence trading logic) ----------------
+// Human-readable label for the raw setup-stage number.
+vwapPB_stateLabel(stage) =>
+    switch stage
+        0 => "0: Waiting Trend"
+        1 => "1: Waiting Impulse"
+        2 => "2: Waiting Pullback"
+        3 => "3: Waiting Confirmation"
+        4 => "4: Trade Active"
+        => "Unknown"
+
+// Why new entries are currently locked out for the rest of the day, if they
+// are. Mirrors vwapPB_canTradeToday's logic exactly, just spelled out.
+vwapPB_dailyLockoutReason(state) =>
+    reason = "None"
+    if state.dayHitBigWin
+        reason := "Big Win Reached (>= " + str.tostring(vwapPB_targetRMultipleInput) + "R)"
+    else if state.dayLosingTrades >= vwapPB_maxLosingTradesPerDayInput
+        reason := "Max Losing Trades (" + str.tostring(state.dayLosingTrades) + ")"
+    else if state.dayRealizedPnL <= -vwapPB_maxDailyLossDollarsInput
+        reason := "Max Daily Loss ($" + str.tostring(state.dayRealizedPnL, "#.##") + ")"
+    else if state.dayClosedTrades >= vwapPB_maxTradesPerDayInput
+        reason := "Max Trades Per Day (" + str.tostring(state.dayClosedTrades) + ")"
+    reason
+
 // --- Reporting signal flags (chart markers only; recomputed every bar) -------
 vwapPB_impulseMarkerSignal      = false
 vwapPB_pullbackMarkerSignal     = false
@@ -323,7 +380,15 @@ runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
     if forceCloseTime and state.setupStage != 4
         vwapPB_resetSetup(state)
 
-    if vwapPB_enableInput
+    // Scanning is also gated on "not forceCloseTime": without this, a setup
+    // reset by the line above could immediately re-advance from stage 0 to
+    // stage 1 later in this same bar's pass through the chain below (if
+    // trendOK happened to be true), then get reset again next bar, forever
+    // flickering for the rest of the day instead of staying idle. No trade
+    // could ever result from this (entryWindow below is already false), but
+    // the flicker is real state churn and would be misleading in the debug
+    // panel, so scanning is simply switched off once the window has closed.
+    if vwapPB_enableInput and not forceCloseTime
         trendOK = vwapPB_detectTrend(vwapPB_vwapVal, vwapPB_vwapVal[1], vwapPB_ema9Val, vwapPB_ema20Val)
 
         if state.setupStage == 0
@@ -346,9 +411,11 @@ runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
             // Expiration window 1: the pullback itself must occur within
             // vwapPB_pullbackMaxBarsInput bars of the qualifying impulse.
             barsSinceImpulse = bar_index - state.impulseBarIdx
+            [isInvalid2, invalidReason2] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
             if barsSinceImpulse > vwapPB_pullbackMaxBarsInput
                 vwapPB_resetSetup(state)
-            else if vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_ema9Val, vwapPB_ema20Val)
+            else if isInvalid2
+                state.lastInvalidationReason := invalidReason2
                 vwapPB_resetSetup(state)
             else
                 if vwapPB_detectPullback(vwapPB_vwapVal)
@@ -364,9 +431,11 @@ runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
             // pullback window above - confirmation must occur within
             // vwapPB_confirmationMaxBarsInput bars of the qualifying pullback.
             barsSincePullback = bar_index - state.pullbackBarIdx
+            [isInvalid3, invalidReason3] = vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_vwapFallingNow, vwapPB_emaCrossDownNow)
             if barsSincePullback > vwapPB_confirmationMaxBarsInput
                 vwapPB_resetSetup(state)
-            else if vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_ema9Val, vwapPB_ema20Val)
+            else if isInvalid3
+                state.lastInvalidationReason := invalidReason3
                 vwapPB_resetSetup(state)
             else
                 if vwapPB_checkConfirmation(vwapPB_vwapVal)
@@ -456,3 +525,46 @@ plotshape(vwapPB_impulseMarkerSignal,      title = "VWAP Pullback Long: Impulse"
 plotshape(vwapPB_pullbackMarkerSignal,     title = "VWAP Pullback Long: Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
 plotshape(vwapPB_confirmationMarkerSignal, title = "VWAP Pullback Long: Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0),   size = size.tiny)
 plotshape(vwapPB_entrySignal,              title = "VWAP Pullback Long: Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0),   size = size.small)
+
+// =============================================================================
+// MODULE: VWAP Pullback Long - DEBUG VISUALS (temporary, for testing only)
+//
+// Off by default (Enable Debug Visuals). Purely diagnostic: reads state
+// already computed above and never influences any trading decision. Numeric
+// values are exposed as Data Window-only plots so they can be inspected bar
+// by bar (including while scrubbing through history); the two text reasons
+// are shown in a small table snapshot of the most recent bar. Intended to be
+// removed (or just left disabled) once testing is complete.
+// =============================================================================
+
+vwapPB_debugState             = vwapPB_debugEnableInput ? vwapPBState.setupStage : na
+vwapPB_debugImpulseBarIdx     = vwapPB_debugEnableInput ? vwapPBState.impulseBarIdx : na
+vwapPB_debugPullbackBarIdx    = vwapPB_debugEnableInput ? vwapPBState.pullbackBarIdx : na
+vwapPB_debugBarsSinceImpulse  = vwapPB_debugEnableInput and not na(vwapPBState.impulseBarIdx)  ? bar_index - vwapPBState.impulseBarIdx  : na
+vwapPB_debugBarsSincePullback = vwapPB_debugEnableInput and not na(vwapPBState.pullbackBarIdx) ? bar_index - vwapPBState.pullbackBarIdx : na
+
+plot(vwapPB_debugState,             title = "Debug: State Number",         display = display.data_window)
+plot(vwapPB_debugImpulseBarIdx,     title = "Debug: Impulse Bar Index",    display = display.data_window)
+plot(vwapPB_debugPullbackBarIdx,    title = "Debug: Pullback Bar Index",   display = display.data_window)
+plot(vwapPB_debugBarsSinceImpulse,  title = "Debug: Bars Since Impulse",   display = display.data_window)
+plot(vwapPB_debugBarsSincePullback, title = "Debug: Bars Since Pullback",  display = display.data_window)
+
+var table vwapPB_debugTable = table.new(position.bottom_right, 2, 8, border_width = 1, border_color = color.gray)
+
+if vwapPB_debugEnableInput and barstate.islast
+    table.cell(vwapPB_debugTable, 0, 0, "VWAP Pullback Long - DEBUG", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 0, "", bgcolor = color.new(color.gray, 30))
+    table.cell(vwapPB_debugTable, 0, 1, "State",                 text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 1, vwapPB_stateLabel(vwapPBState.setupStage), text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 2, "Impulse Bar Index",     text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 2, na(vwapPBState.impulseBarIdx)  ? "-" : str.tostring(vwapPBState.impulseBarIdx),  text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 3, "Pullback Bar Index",    text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 3, na(vwapPBState.pullbackBarIdx) ? "-" : str.tostring(vwapPBState.pullbackBarIdx), text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 4, "Bars Since Impulse",    text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 4, na(vwapPBState.impulseBarIdx)  ? "-" : str.tostring(bar_index - vwapPBState.impulseBarIdx),  text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 5, "Bars Since Pullback",   text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 5, na(vwapPBState.pullbackBarIdx) ? "-" : str.tostring(bar_index - vwapPBState.pullbackBarIdx), text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 6, "Last Invalidation Reason", text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 6, vwapPBState.lastInvalidationReason, text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 0, 7, "Daily Lockout Reason",  text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
+    table.cell(vwapPB_debugTable, 1, 7, vwapPB_dailyLockoutReason(vwapPBState), text_color = color.white, bgcolor = color.new(color.black, 60), text_size = size.small)
