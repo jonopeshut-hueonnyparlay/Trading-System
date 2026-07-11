@@ -1,301 +1,435 @@
 //@version=6
 // =============================================================================
-// SPY/QQQ VWAP Pullback Long - Core Version
+// Trading System - Multi-Strategy Intraday Long Framework
+// Currently active module: SPY/QQQ VWAP Pullback Long (Core Version)
 //
 // PURPOSE
 //   Backtesting / paper-trading research only. This is NOT investment advice
 //   and is not intended for unattended live trading.
 //
+// ARCHITECTURE
+//   This script is organized as a small "framework" plus one active
+//   "strategy module" (VWAP Pullback Long). The framework provides pieces
+//   any future strategy module can reuse:
+//     - a shared StrategyState type (each module owns one persistent
+//       instance, so no two modules can ever read/write each other's state)
+//     - a shared `activeStrategyId` marker recording which module currently
+//       owns the single open position allowed system-wide
+//     - shared utility functions (symbol filter, backtest date range,
+//       position sizing math, stop-buffer math, ET day/time helpers)
+//   Each strategy module (VWAP Pullback Long today; more later) is fully
+//   self-contained: its own "Enable" input, its own unique setup id string,
+//   its own inputs (grouped under its own name in Settings), its own
+//   trend/setup/entry/stop/target/sizing/execution/reporting functions, and
+//   its own daily counters filtered by its own setup id so it can never be
+//   affected by another module's trades. See the "FUTURE STRATEGY MODULES"
+//   section near the bottom for the exact pattern to follow when adding one.
+//
+//   Only one position may be open at a time across the WHOLE script
+//   (pyramiding = 0, and every module checks canOpenNewPosition() before
+//   entering). This is a deliberate account-level constraint shared by all
+//   modules, not a per-module limit.
+//
 // ORDER-FILL ASSUMPTIONS (read this before trusting any backtest numbers)
-//   1. Entries: the confirmation candle is evaluated only after it has
-//      CLOSED (barstate.isconfirmed). The entry order is a market order
+//   1. Entries: a module's confirmation candle is evaluated only after it
+//      has CLOSED (barstate.isconfirmed). The entry order is a market order
 //      submitted on that same confirmed bar, and because the strategy is
 //      declared with process_orders_on_close = true, it is filled AT THAT
-//      BAR'S CLOSE (i.e., the confirmation candle's close price), plus the
-//      configured slippage. No future bar's data is used to decide or price
-//      the entry.
+//      BAR'S CLOSE, plus configured slippage. No future bar's data is used
+//      to decide or price the entry.
 //   2. Stops / targets: submitted immediately after the entry fills, as a
 //      static OCA stop + limit bracket (strategy.exit). TradingView's
 //      broker emulator fills these intrabar, using each subsequent bar's
 //      high/low, exactly like a real resting stop/limit order would. This
 //      is realistic and is NOT lookahead bias because only that bar's own
 //      high/low (which only exist once the bar has printed) are used.
-//   3. Force-close at the end of the entry window: evaluated on confirmed
-//      bars only, so on a 5-minute chart the force-close can occur up to
-//      ~5 minutes after the configured cutoff (the close of the bar that
-//      contains/crosses the cutoff time). See "Known limitations".
+//   3. Force-close at the end of a module's entry window: evaluated on
+//      confirmed bars only, so on a 5-minute chart the force-close can
+//      occur up to ~5 minutes after the configured cutoff (the close of
+//      the bar that contains/crosses the cutoff time).
 //   4. No higher-timeframe or daily data is requested anywhere (no
 //      request.security calls), so there is no possibility of using a
 //      still-forming daily high/low before it has actually occurred.
 // =============================================================================
 
 strategy(
-     "SPY/QQQ VWAP Pullback Long - Core",
-     shorttitle            = "VWAP Pullback Core",
-     overlay                = true,
-     pyramiding             = 0,
-     initial_capital         = 5000,      // keep in sync with "Simulated Bankroll" input below (see assumptions)
-     default_qty_type        = strategy.fixed,
-     default_qty_value       = 1,
-     currency                = currency.USD,
-     commission_type          = strategy.commission.percent,
-     commission_value         = input.float(0.0, "Commission (%)", minval = 0.0, step = 0.01, group = "Backtest Settings"),
-     slippage                 = input.int(1, "Slippage (ticks)", minval = 0, group = "Backtest Settings"),
-     process_orders_on_close  = true,
-     calc_on_every_tick       = false)
+     "Trading System - Intraday Long Framework",
+     shorttitle              = "Intraday Long Framework",
+     overlay                  = true,
+     pyramiding               = 0,
+     initial_capital           = 5000,      // keep in sync with each module's own bankroll input (see docs)
+     default_qty_type          = strategy.fixed,
+     default_qty_value         = 1,
+     currency                  = currency.USD,
+     commission_type            = strategy.commission.percent,
+     commission_value           = input.float(0.0, "Commission (%)", minval = 0.0, step = 0.01, group = "Backtest Settings"),
+     slippage                   = input.int(1, "Slippage (ticks)", minval = 0, group = "Backtest Settings"),
+     process_orders_on_close    = true,
+     calc_on_every_tick         = false)
 
 // =============================================================================
-// INPUTS
+// GLOBAL / ACCOUNT-LEVEL SETTINGS (shared by every module)
 // =============================================================================
 
-// --- Symbol filter --------------------------------------------------------
-allowOtherSymbolsInput = input.bool(false, "Allow Other Symbols (default: SPY/QQQ only)", group = "Symbol Filter")
-
-// --- Trading window (America/New_York) ------------------------------------
-entryStartHourInput   = input.int(9,  "Entry Window Start Hour (ET, 24h)",   minval = 0, maxval = 23, group = "Trading Window (ET)")
-entryStartMinuteInput = input.int(45, "Entry Window Start Minute (ET)",      minval = 0, maxval = 59, group = "Trading Window (ET)")
-entryEndHourInput     = input.int(11, "Entry Window End / Force-Close Hour (ET, 24h)", minval = 0, maxval = 23, group = "Trading Window (ET)")
-entryEndMinuteInput   = input.int(15, "Entry Window End / Force-Close Minute (ET)",    minval = 0, maxval = 59, group = "Trading Window (ET)")
-
-// --- Indicators -------------------------------------------------------------
-ema9LenInput  = input.int(9,  "Fast EMA Length",  minval = 1, group = "Indicators")
-ema20LenInput = input.int(20, "Slow EMA Length",  minval = 1, group = "Indicators")
-atrLenInput   = input.int(14, "ATR Length",       minval = 1, group = "Indicators")
-
-// --- Impulse ------------------------------------------------------------
-impulsePricePctInput = input.float(0.15, "Impulse: Min % High Above VWAP",         minval = 0.0, step = 0.01, group = "Impulse")
-impulseAtrMultInput  = input.float(0.5,  "Impulse: Min ATR Multiple High Above VWAP", minval = 0.0, step = 0.05, group = "Impulse")
-
-// --- Pullback -----------------------------------------------------------
-pullbackMaxBarsInput         = input.int(15,   "Pullback: Max Bars After Impulse",        minval = 1, group = "Pullback")
-pullbackTolerancePctInput    = input.float(0.10, "Pullback: Low Proximity to VWAP (%)",     minval = 0.0, step = 0.01, group = "Pullback")
-pullbackMaxCloseBelowPctInput = input.float(0.05, "Pullback: Max Candle Close Below VWAP (%)", minval = 0.0, step = 0.01, group = "Pullback")
-invalidationPctInput          = input.float(0.20, "Invalidation: Material Close Below VWAP (%)", minval = 0.0, step = 0.01, group = "Pullback")
-
-// --- Confirmation ---------------------------------------------------------
-confirmMinBodyPctInput = input.float(50, "Confirmation: Min Body % of Bar Range", minval = 0, maxval = 100, step = 1, group = "Confirmation")
-
-// --- Stop loss ------------------------------------------------------------
-maxStopDistancePctInput = input.float(0.30, "Max Stop Distance (% of Entry Price)", minval = 0.01, step = 0.01, group = "Stop Loss")
-
-// --- Profit target --------------------------------------------------------
-targetRMultipleInput = input.float(2.0, "Target R Multiple", minval = 0.1, step = 0.1, group = "Profit Target")
-
-// --- Position sizing --------------------------------------------------------
-bankrollInput      = input.float(5000, "Simulated Bankroll ($) - keep in sync with Initial Capital property", minval = 1, group = "Position Sizing")
-maxRiskDollarsInput = input.float(25,   "Max Risk Per Trade ($)", minval = 1, group = "Position Sizing")
-maxTradeValueInput  = input.float(5000, "Max Trade Value ($)",    minval = 1, group = "Position Sizing")
-
-// --- Daily limits -----------------------------------------------------------
-maxTradesPerDayInput       = input.int(2,  "Max Trades Per Day",              minval = 1, group = "Daily Limits")
-maxLosingTradesPerDayInput = input.int(2,  "Max Losing Trades Per Day",       minval = 1, group = "Daily Limits")
-maxDailyLossDollarsInput   = input.float(50, "Max Daily Realized Loss ($)",   minval = 1, group = "Daily Limits")
-
-// --- Backtest date range ------------------------------------------------
-startDateInput = input.time(timestamp(2020, 1, 1, 0, 0),   "Backtest Start Date", group = "Backtest Settings")
+allowOtherSymbolsInput = input.bool(false, "Allow Other Symbols (default: SPY/QQQ only)", group = "Global Settings")
+startDateInput = input.time(timestamp(2020, 1, 1, 0, 0),    "Backtest Start Date", group = "Backtest Settings")
 endDateInput   = input.time(timestamp(2099, 12, 31, 23, 59), "Backtest End Date",   group = "Backtest Settings")
 
 // =============================================================================
-// INDICATORS (recalculated every tick for smooth plotting; no trading
-// decision is made off these until the confirmed-bar gate below)
+// SHARED TYPES
 // =============================================================================
 
-vwapVal  = ta.vwap(hlc3)
-ema9Val  = ta.ema(close, ema9LenInput)
-ema20Val = ta.ema(close, ema20LenInput)
-atrVal   = ta.atr(atrLenInput)
+// One instance of this type belongs to exactly one strategy module. Holding
+// setup-machine state, trade bracket levels, and daily counters in a single
+// per-module object (rather than a pile of loose global variables) is what
+// guarantees two modules can never accidentally read or overwrite each
+// other's state, even if they are both enabled and running at once.
+type StrategyState
+    string id                    = ""
+    int    setupStage            = 0     // 0=trend,1=impulse,2=pullback,3=confirmation,4=trade active
+    float  impulseHigh           = na
+    int    impulseBarIdx         = na
+    float  pullbackLow           = na
+    bool   pullbackValid         = false
+    int    pullbackBarIdx        = na
+    float  entryPrice            = na
+    float  stopPrice             = na
+    float  targetPrice           = na
+    float  lastRiskDollars       = na
+    int    lastDayId             = na
+    int    dayClosedTrades       = 0
+    int    dayLosingTrades       = 0
+    float  dayRealizedPnL        = 0.0
+    bool   dayHitBigWin          = false
+    int    prevClosedTradesCount = 0
 
 // =============================================================================
-// SESSION / TIMEZONE HANDLING (explicit America/New_York)
+// SHARED RUNTIME STATE
 // =============================================================================
 
-etHour   = hour(time, "America/New_York")
-etMinute = minute(time, "America/New_York")
-etYear   = year(time, "America/New_York")
-etMonth  = month(time, "America/New_York")
-etDay    = dayofmonth(time, "America/New_York")
-
-etMinutesOfDay = etHour * 60 + etMinute
-windowStartMin = entryStartHourInput * 60 + entryStartMinuteInput
-windowEndMin   = entryEndHourInput * 60 + entryEndMinuteInput
-
-inEntryWindow  = etMinutesOfDay >= windowStartMin and etMinutesOfDay < windowEndMin
-forceCloseTime = etMinutesOfDay >= windowEndMin
-
-dayId  = etYear * 10000 + etMonth * 100 + etDay
-dateRangeOK = time >= startDateInput and time <= endDateInput
-
-allowedSymbol = allowOtherSymbolsInput or syminfo.ticker == "SPY" or syminfo.ticker == "QQQ"
+// Records which module's setup id currently owns the single open position
+// allowed system-wide. na when flat. Every module must check this (via
+// canOpenNewPosition() / its own id comparison) before managing a position,
+// so modules never step on each other's trades.
+var string activeStrategyId = na
 
 // =============================================================================
-// STATE MACHINE VARIABLES
-//   0 = Waiting for bullish trend
-//   1 = Waiting for impulse
-//   2 = Waiting for pullback
-//   3 = Waiting for confirmation
-//   4 = Trade active
-// Invalidation / expiration are transient events that immediately fall
-// back to state 0 (they are not held as a persistent state).
+// SHARED UTILITY FUNCTIONS (usable by any strategy module)
 // =============================================================================
 
-var int   state           = 0
-var float impulseHigh     = na
-var int   impulseBarIdx   = na
-var float pullbackLow     = na
-var bool  pullbackValid   = false
+isAllowedSymbol(allowOther) =>
+    allowOther or syminfo.ticker == "SPY" or syminfo.ticker == "QQQ"
 
-var float entryPrice      = na
-var float stopPrice       = na
-var float targetPrice     = na
-var float lastRiskDollars = na
+inBacktestRange(startDate, endDate) =>
+    time >= startDate and time <= endDate
 
-var int   lastDayId              = na
-var int   dayClosedTrades        = 0
-var int   dayLosingTrades        = 0
-var float dayRealizedPnL         = 0.0
-var bool  dayHitBigWin           = false
-var int   prevClosedTradesCount  = 0
-var float prevPositionSize       = 0.0
+// True only when the whole script is flat - the shared, account-level
+// "one open position at a time" gate every module's entry logic must pass.
+canOpenNewPosition() =>
+    strategy.position_size == 0
 
-resetSetup() =>
-    state         := 0
-    impulseHigh   := na
-    impulseBarIdx := na
-    pullbackLow   := na
-    pullbackValid := false
+// Generic risk-based + capital-capped share sizing, floored to whole shares.
+calcPositionSize(entryPx, riskPerShare, maxRiskDollars, maxTradeValue) =>
+    sharesByRisk    = math.floor(maxRiskDollars / riskPerShare)
+    sharesByCapital = math.floor(maxTradeValue / entryPx)
+    math.min(sharesByRisk, sharesByCapital)
 
-// Per-bar signal flags used only for chart markers (recomputed every bar)
-impulseMarkerSignal      = false
-pullbackMarkerSignal     = false
-confirmationMarkerSignal = false
-entrySignal              = false
+// Minimum stop buffer: the greater of 1 minimum tick or 0.01% of price.
+minStopBuffer(price) =>
+    math.max(syminfo.mintick, price * 0.0001)
+
+// Minutes elapsed since Eastern Time midnight for the current bar.
+etMinutesOfDay() =>
+    hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+
+// A numeric id that changes once per Eastern Time calendar day.
+etDayId() =>
+    year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
 
 // =============================================================================
-// MAIN LOGIC - confirmed bars only (no repainting, no lookahead)
+// MODULE: VWAP Pullback Long        (setup id: "VWAPPullbackLong")
+// =============================================================================
+
+VWAP_PB_ID = "VWAPPullbackLong"
+
+// --- Inputs -----------------------------------------------------------------
+vwapPB_enableInput = input.bool(true, "Enable VWAP Pullback Long", group = "VWAP Pullback Long")
+
+vwapPB_entryStartHourInput   = input.int(9,  "Entry Window Start Hour (ET, 24h)",   minval = 0, maxval = 23, group = "VWAP Pullback Long: Trading Window")
+vwapPB_entryStartMinuteInput = input.int(45, "Entry Window Start Minute (ET)",      minval = 0, maxval = 59, group = "VWAP Pullback Long: Trading Window")
+vwapPB_entryEndHourInput     = input.int(11, "Entry Window End / Force-Close Hour (ET, 24h)", minval = 0, maxval = 23, group = "VWAP Pullback Long: Trading Window")
+vwapPB_entryEndMinuteInput   = input.int(15, "Entry Window End / Force-Close Minute (ET)",    minval = 0, maxval = 59, group = "VWAP Pullback Long: Trading Window")
+
+vwapPB_ema9LenInput  = input.int(9,  "Fast EMA Length", minval = 1, group = "VWAP Pullback Long: Indicators")
+vwapPB_ema20LenInput = input.int(20, "Slow EMA Length", minval = 1, group = "VWAP Pullback Long: Indicators")
+vwapPB_atrLenInput   = input.int(14, "ATR Length",      minval = 1, group = "VWAP Pullback Long: Indicators")
+
+vwapPB_impulsePricePctInput = input.float(0.15, "Impulse: Min % High Above VWAP",           minval = 0.0, step = 0.01, group = "VWAP Pullback Long: Impulse")
+vwapPB_impulseAtrMultInput  = input.float(0.5,  "Impulse: Min ATR Multiple High Above VWAP", minval = 0.0, step = 0.05, group = "VWAP Pullback Long: Impulse")
+
+vwapPB_pullbackMaxBarsInput          = input.int(15,   "Pullback: Max Bars After Impulse",          minval = 1,   group = "VWAP Pullback Long: Pullback")
+vwapPB_pullbackTolerancePctInput     = input.float(0.10, "Pullback: Low Proximity to VWAP (%)",       minval = 0.0, step = 0.01, group = "VWAP Pullback Long: Pullback")
+vwapPB_pullbackMaxCloseBelowPctInput = input.float(0.05, "Pullback: Max Candle Close Below VWAP (%)",  minval = 0.0, step = 0.01, group = "VWAP Pullback Long: Pullback")
+vwapPB_invalidationPctInput          = input.float(0.20, "Invalidation: Material Close Below VWAP (%)", minval = 0.0, step = 0.01, group = "VWAP Pullback Long: Pullback")
+vwapPB_vwapFallingBarsInput          = input.int(2, "Invalidation: VWAP Falling Bar Streak", minval = 1, group = "VWAP Pullback Long: Pullback")
+
+vwapPB_confirmMinBodyPctInput   = input.float(50, "Confirmation: Min Body % of Bar Range", minval = 0, maxval = 100, step = 1, group = "VWAP Pullback Long: Confirmation")
+vwapPB_confirmationMaxBarsInput = input.int(5, "Confirmation: Max Bars After Pullback", minval = 1, group = "VWAP Pullback Long: Confirmation")
+
+vwapPB_maxStopDistancePctInput = input.float(0.30, "Max Stop Distance (% of Entry Price)", minval = 0.01, step = 0.01, group = "VWAP Pullback Long: Stop Loss")
+
+vwapPB_targetRMultipleInput = input.float(2.0, "Target R Multiple", minval = 0.1, step = 0.1, group = "VWAP Pullback Long: Profit Target")
+
+vwapPB_bankrollInput       = input.float(5000, "Simulated Bankroll ($) - keep in sync with Initial Capital property", minval = 1, group = "VWAP Pullback Long: Position Sizing")
+vwapPB_maxRiskDollarsInput  = input.float(25,   "Max Risk Per Trade ($)", minval = 1, group = "VWAP Pullback Long: Position Sizing")
+vwapPB_maxTradeValueInput   = input.float(5000, "Max Trade Value ($)",    minval = 1, group = "VWAP Pullback Long: Position Sizing")
+
+vwapPB_maxTradesPerDayInput       = input.int(2,  "Max Trades Per Day",            minval = 1, group = "VWAP Pullback Long: Daily Limits")
+vwapPB_maxLosingTradesPerDayInput = input.int(2,  "Max Losing Trades Per Day",     minval = 1, group = "VWAP Pullback Long: Daily Limits")
+vwapPB_maxDailyLossDollarsInput   = input.float(50, "Max Daily Realized Loss ($)", minval = 1, group = "VWAP Pullback Long: Daily Limits")
+
+vwapPB_windowStartMin = vwapPB_entryStartHourInput * 60 + vwapPB_entryStartMinuteInput
+vwapPB_windowEndMin   = vwapPB_entryEndHourInput * 60 + vwapPB_entryEndMinuteInput
+
+// --- Module state -------------------------------------------------------------
+var StrategyState vwapPBState = StrategyState.new(id = VWAP_PB_ID)
+
+// --- Indicators (module-specific: VWAP / 9-20 EMA / ATR) ----------------------
+vwapPB_vwapVal  = ta.vwap(hlc3)
+vwapPB_ema9Val  = ta.ema(close, vwapPB_ema9LenInput)
+vwapPB_ema20Val = ta.ema(close, vwapPB_ema20LenInput)
+vwapPB_atrVal   = ta.atr(vwapPB_atrLenInput)
+
+// --- Trend detection ------------------------------------------------------
+vwapPB_detectTrend(vwapVal, vwapPrev, ema9Val, ema20Val) =>
+    close > vwapVal and vwapVal > vwapPrev and ema9Val > ema20Val
+
+// --- Setup detection: impulse -----------------------------------------------
+vwapPB_detectImpulse(vwapVal, atrVal) =>
+    high >= vwapVal * (1 + vwapPB_impulsePricePctInput / 100) or high >= vwapVal + vwapPB_impulseAtrMultInput * atrVal
+
+// --- Setup detection: pullback -----------------------------------------------
+vwapPB_detectPullback(vwapVal) =>
+    lowNearVwap = math.abs(low - vwapVal) <= vwapVal * (vwapPB_pullbackTolerancePctInput / 100)
+    closeOK     = close >= vwapVal * (1 - vwapPB_pullbackMaxCloseBelowPctInput / 100)
+    lowNearVwap and closeOK
+
+// Invalidates an in-progress setup (post-impulse) without requiring every
+// original trend condition to keep holding on every pullback bar. Any ONE
+// of these is enough to kill the setup before entry:
+//   - VWAP is clearly falling (a configurable consecutive down-bar streak)
+//   - the 9 EMA crosses below the 20 EMA
+//   - price closes below the configurable material-VWAP-break threshold
+vwapPB_isInvalidated(vwapVal, ema9Val, ema20Val) =>
+    vwapFalling   = ta.falling(vwapVal, vwapPB_vwapFallingBarsInput)
+    emaCrossDown  = ta.crossunder(ema9Val, ema20Val)
+    materialBreak = close <= vwapVal * (1 - vwapPB_invalidationPctInput / 100)
+    vwapFalling or emaCrossDown or materialBreak
+
+// --- Confirmation / entry trigger --------------------------------------------
+vwapPB_checkConfirmation(vwapVal) =>
+    bodyRange = high - low
+    bodySize  = math.abs(close - open)
+    bodyOK    = bodyRange > 0 and (bodySize / bodyRange) >= (vwapPB_confirmMinBodyPctInput / 100)
+    close > open and close > high[1] and close > vwapVal and bodyOK
+
+// --- Stop calculation ---------------------------------------------------------
+// Returns [stopPrice, riskPerShare, isValid]
+vwapPB_calcStop(pullbackLow, entryPx) =>
+    stop        = pullbackLow - minStopBuffer(entryPx)
+    risk        = entryPx - stop
+    stopDistPct = entryPx > 0 ? (risk / entryPx * 100) : 100.0
+    valid       = stop < entryPx and risk > 0 and stopDistPct <= vwapPB_maxStopDistancePctInput
+    [stop, risk, valid]
+
+// --- Target calculation ---------------------------------------------------
+vwapPB_calcTarget(entryPx, riskPerShare) =>
+    entryPx + vwapPB_targetRMultipleInput * riskPerShare
+
+// --- Daily / account trading gate --------------------------------------------
+vwapPB_canTradeToday(state) =>
+    state.dayClosedTrades < vwapPB_maxTradesPerDayInput and state.dayLosingTrades < vwapPB_maxLosingTradesPerDayInput and state.dayRealizedPnL > -vwapPB_maxDailyLossDollarsInput and not state.dayHitBigWin
+
+// --- Trade execution -----------------------------------------------------
+vwapPB_executeEntry(state, entryPx, stopPx, targetPx, shares) =>
+    state.entryPrice      := entryPx
+    state.stopPrice        := stopPx
+    state.targetPrice      := targetPx
+    state.lastRiskDollars  := (entryPx - stopPx) * shares
+    strategy.entry(state.id, strategy.long, qty = shares)
+    strategy.exit(state.id + "Exit", from_entry = state.id, stop = stopPx, limit = targetPx)
+    activeStrategyId := state.id
+    state.setupStage := 4
+
+// --- Setup reset -----------------------------------------------------------
+vwapPB_resetSetup(state) =>
+    state.setupStage    := 0
+    state.impulseHigh    := na
+    state.impulseBarIdx  := na
+    state.pullbackLow    := na
+    state.pullbackValid  := false
+    state.pullbackBarIdx := na
+
+// --- Daily reset (new Eastern Time day) --------------------------------------
+vwapPB_manageDailyReset(state) =>
+    today = etDayId()
+    if na(state.lastDayId) or today != state.lastDayId
+        state.dayClosedTrades := 0
+        state.dayLosingTrades := 0
+        state.dayRealizedPnL  := 0.0
+        state.dayHitBigWin    := false
+        vwapPB_resetSetup(state)
+        state.lastDayId := today
+
+// --- Closed-trade accounting -------------------------------------------------
+// Filters strategy.closedtrades by this module's own entry id, so a future
+// module's trades can never be miscounted into this module's daily stats.
+vwapPB_updateDailyStats(state) =>
+    if strategy.closedtrades > state.prevClosedTradesCount
+        for i = state.prevClosedTradesCount to strategy.closedtrades - 1
+            if strategy.closedtrades.entry_id(i) == state.id
+                tradeProfit = strategy.closedtrades.profit(i)
+                state.dayRealizedPnL += tradeProfit
+                state.dayClosedTrades += 1
+                if tradeProfit <= 0
+                    state.dayLosingTrades += 1
+                if not na(state.lastRiskDollars) and state.lastRiskDollars > 0 and (tradeProfit / state.lastRiskDollars) >= vwapPB_targetRMultipleInput
+                    state.dayHitBigWin := true
+        state.prevClosedTradesCount := strategy.closedtrades
+
+// --- Exit / session management -----------------------------------------------
+vwapPB_manageExit(state, forceCloseTime) =>
+    if strategy.position_size > 0 and activeStrategyId == state.id and forceCloseTime
+        strategy.close(state.id, comment = "Force Close (Window End)")
+    if activeStrategyId == state.id and strategy.position_size == 0
+        vwapPB_resetSetup(state)
+        activeStrategyId := na
+
+// --- Reporting signal flags (chart markers only; recomputed every bar) -------
+vwapPB_impulseMarkerSignal      = false
+vwapPB_pullbackMarkerSignal     = false
+vwapPB_confirmationMarkerSignal = false
+vwapPB_entrySignal              = false
+
+// --- Module driver: ties the whole pipeline together for one bar -------------
+runVwapPullbackLong(state, allowedSymbol, dateRangeOK) =>
+    // Book-keeping (daily reset, exit handling, stats) always runs, even if
+    // the module is disabled, so an already-open trade is never abandoned.
+    vwapPB_manageDailyReset(state)
+    forceCloseTime = etMinutesOfDay() >= vwapPB_windowEndMin
+    vwapPB_manageExit(state, forceCloseTime)
+    vwapPB_updateDailyStats(state)
+
+    if forceCloseTime and state.setupStage != 4
+        vwapPB_resetSetup(state)
+
+    if vwapPB_enableInput
+        trendOK = vwapPB_detectTrend(vwapPB_vwapVal, vwapPB_vwapVal[1], vwapPB_ema9Val, vwapPB_ema20Val)
+
+        if state.setupStage == 0
+            if trendOK
+                state.setupStage := 1
+
+        else if state.setupStage == 1
+            if not trendOK
+                vwapPB_resetSetup(state)
+            else
+                if vwapPB_detectImpulse(vwapPB_vwapVal, vwapPB_atrVal)
+                    state.impulseHigh   := high
+                    state.impulseBarIdx := bar_index
+                    state.pullbackLow   := na
+                    state.pullbackValid := false
+                    vwapPB_impulseMarkerSignal := true
+                    state.setupStage := 2
+
+        else if state.setupStage == 2
+            // Expiration window 1: the pullback itself must occur within
+            // vwapPB_pullbackMaxBarsInput bars of the qualifying impulse.
+            barsSinceImpulse = bar_index - state.impulseBarIdx
+            if barsSinceImpulse > vwapPB_pullbackMaxBarsInput
+                vwapPB_resetSetup(state)
+            else if vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_ema9Val, vwapPB_ema20Val)
+                vwapPB_resetSetup(state)
+            else
+                if vwapPB_detectPullback(vwapPB_vwapVal)
+                    state.pullbackLow    := low
+                    state.pullbackValid  := true
+                    state.pullbackBarIdx := bar_index
+                    vwapPB_pullbackMarkerSignal := true
+                    state.setupStage := 3
+
+        else if state.setupStage == 3
+            state.pullbackLow := math.min(state.pullbackLow, low)
+            // Expiration window 2: separate and independent from the
+            // pullback window above - confirmation must occur within
+            // vwapPB_confirmationMaxBarsInput bars of the qualifying pullback.
+            barsSincePullback = bar_index - state.pullbackBarIdx
+            if barsSincePullback > vwapPB_confirmationMaxBarsInput
+                vwapPB_resetSetup(state)
+            else if vwapPB_isInvalidated(vwapPB_vwapVal, vwapPB_ema9Val, vwapPB_ema20Val)
+                vwapPB_resetSetup(state)
+            else
+                if vwapPB_checkConfirmation(vwapPB_vwapVal)
+                    vwapPB_confirmationMarkerSignal := true
+
+                    candidateEntryPrice = close
+                    [candidateStop, candidateRisk, riskValid] = vwapPB_calcStop(state.pullbackLow, candidateEntryPrice)
+
+                    entryWindow    = etMinutesOfDay() >= vwapPB_windowStartMin and etMinutesOfDay() < vwapPB_windowEndMin
+                    allowedToTrade = allowedSymbol and timeframe.isintraday and entryWindow and dateRangeOK and vwapPB_canTradeToday(state) and canOpenNewPosition()
+
+                    if riskValid and allowedToTrade
+                        shares = calcPositionSize(candidateEntryPrice, candidateRisk, vwapPB_maxRiskDollarsInput, vwapPB_maxTradeValueInput)
+                        if shares >= 1
+                            targetPx = vwapPB_calcTarget(candidateEntryPrice, candidateRisk)
+                            vwapPB_executeEntry(state, candidateEntryPrice, candidateStop, targetPx, shares)
+                            vwapPB_entrySignal := true
+                        else
+                            vwapPB_resetSetup(state)
+                    else
+                        vwapPB_resetSetup(state)
+
+// =============================================================================
+// FUTURE STRATEGY MODULES
+//
+// To add a new strategy without touching any VWAP Pullback Long code:
+//   1. Pick a unique setup id string, e.g. MY_STRATEGY_ID = "MyStrategyName".
+//   2. Add an "Enable <Strategy Name>" input plus that module's own inputs,
+//      each with group = "<Strategy Name>: <Section>" so they appear in
+//      their own block in Settings.
+//   3. Declare its own state:  var StrategyState myStrategyState =
+//      StrategyState.new(id = MY_STRATEGY_ID)
+//   4. Write its own myStrategy_detectTrend / _detectSetup / _checkEntry /
+//      _calcStop / _calcTarget / _executeEntry / _resetSetup /
+//      _manageDailyReset / _updateDailyStats / _manageExit functions,
+//      mirroring the vwapPB_* functions above. Reuse the shared utilities
+//      (isAllowedSymbol, inBacktestRange, canOpenNewPosition,
+//      calcPositionSize, minStopBuffer, etMinutesOfDay, etDayId) instead of
+//      duplicating them.
+//   5. Write a runMyStrategy(state, allowedSymbol, dateRangeOK) driver
+//      function following the same shape as runVwapPullbackLong above, and
+//      call it from the MAIN EXECUTION block below.
+//   6. Add its own plot()/plotshape() calls in its own "Visuals" block.
+// Because every module reads/writes only its own StrategyState instance and
+// filters strategy.closedtrades by its own unique id, this can be done
+// without any risk of interfering with VWAP Pullback Long's state, daily
+// counters, or trades - the only shared resource is the single open-position
+// slot (activeStrategyId / canOpenNewPosition()), by design.
+// =============================================================================
+
+// =============================================================================
+// MAIN EXECUTION - confirmed bars only (no repainting, no lookahead)
 // =============================================================================
 
 if barstate.isconfirmed
+    allowedSymbol = isAllowedSymbol(allowOtherSymbolsInput)
+    dateRangeOK   = inBacktestRange(startDateInput, endDateInput)
 
-    // --- New Eastern Time trading day: reset daily counters and setup ------
-    newDay = na(lastDayId) or dayId != lastDayId
-    if newDay
-        dayClosedTrades := 0
-        dayLosingTrades := 0
-        dayRealizedPnL  := 0.0
-        dayHitBigWin    := false
-        resetSetup()
-        lastDayId := dayId
-
-    // --- Force-close any open trade at the end of the entry window ---------
-    if strategy.position_size > 0 and forceCloseTime
-        strategy.close("Long", comment = "Force Close (Window End)")
-
-    // --- Session end: no more entries possible today, kill a pending setup -
-    if forceCloseTime and state != 4
-        resetSetup()
-
-    // --- Bullish trend gate --------------------------------------------------
-    trendOK = close > vwapVal and vwapVal > vwapVal[1] and ema9Val > ema20Val
-
-    // --- State machine (advances at most one stage per bar) -----------------
-    if state == 0
-        if trendOK
-            state := 1
-
-    else if state == 1
-        if not trendOK
-            resetSetup()
-        else
-            impulseNow = high >= vwapVal * (1 + impulsePricePctInput / 100) or high >= vwapVal + impulseAtrMultInput * atrVal
-            if impulseNow
-                impulseHigh   := high
-                impulseBarIdx := bar_index
-                pullbackLow   := na
-                pullbackValid := false
-                impulseMarkerSignal := true
-                state := 2
-
-    else if state == 2
-        barsSinceImpulse = bar_index - impulseBarIdx
-        if barsSinceImpulse > pullbackMaxBarsInput
-            resetSetup()
-        else if close <= vwapVal * (1 - invalidationPctInput / 100)
-            resetSetup()
-        else
-            lowNearVwap = math.abs(low - vwapVal) <= vwapVal * (pullbackTolerancePctInput / 100)
-            closeOK     = close >= vwapVal * (1 - pullbackMaxCloseBelowPctInput / 100)
-            if lowNearVwap and closeOK
-                pullbackLow  := low
-                pullbackValid := true
-                pullbackMarkerSignal := true
-                state := 3
-
-    else if state == 3
-        pullbackLow := math.min(pullbackLow, low)
-        barsSinceImpulse = bar_index - impulseBarIdx
-        if barsSinceImpulse > pullbackMaxBarsInput
-            resetSetup()
-        else if close <= vwapVal * (1 - invalidationPctInput / 100)
-            resetSetup()
-        else
-            bodyRange = high - low
-            bodySize  = math.abs(close - open)
-            bodyOK    = bodyRange > 0 and (bodySize / bodyRange) >= (confirmMinBodyPctInput / 100)
-            confirmPattern = close > open and close > high[1] and close > vwapVal and bodyOK
-
-            if confirmPattern
-                confirmationMarkerSignal := true
-
-                candidateEntryPrice = close
-                candidateStop  = pullbackLow - math.max(syminfo.mintick, candidateEntryPrice * 0.0001)
-                candidateRisk  = candidateEntryPrice - candidateStop
-                stopDistPct    = candidateEntryPrice > 0 ? (candidateRisk / candidateEntryPrice * 100) : 100.0
-                riskValid      = candidateStop < candidateEntryPrice and candidateRisk > 0 and stopDistPct <= maxStopDistancePctInput
-
-                canTradeToday = dayClosedTrades < maxTradesPerDayInput and dayLosingTrades < maxLosingTradesPerDayInput and dayRealizedPnL > -maxDailyLossDollarsInput and not dayHitBigWin
-
-                allowedToTrade = allowedSymbol and timeframe.isintraday and inEntryWindow and dateRangeOK and canTradeToday
-
-                if riskValid and allowedToTrade
-                    sharesByRisk    = math.floor(maxRiskDollarsInput / candidateRisk)
-                    sharesByCapital = math.floor(maxTradeValueInput / candidateEntryPrice)
-                    shares = math.min(sharesByRisk, sharesByCapital)
-
-                    if shares >= 1
-                        entryPrice      := candidateEntryPrice
-                        stopPrice       := candidateStop
-                        targetPrice     := candidateEntryPrice + targetRMultipleInput * candidateRisk
-                        lastRiskDollars := candidateRisk * shares
-
-                        strategy.entry("Long", strategy.long, qty = shares)
-                        strategy.exit("Exit", from_entry = "Long", stop = stopPrice, limit = targetPrice)
-
-                        entrySignal := true
-                        state := 4
-                    else
-                        resetSetup()
-                else
-                    resetSetup()
-
-    // --- Daily accounting: only count trades that have actually closed -----
-    if strategy.closedtrades > prevClosedTradesCount
-        for i = prevClosedTradesCount to strategy.closedtrades - 1
-            tradeProfit = strategy.closedtrades.profit(i)
-            dayRealizedPnL += tradeProfit
-            dayClosedTrades += 1
-            if tradeProfit <= 0
-                dayLosingTrades += 1
-            if not na(lastRiskDollars) and lastRiskDollars > 0 and (tradeProfit / lastRiskDollars) >= targetRMultipleInput
-                dayHitBigWin := true
-        prevClosedTradesCount := strategy.closedtrades
-
-    // --- Reset the setup state machine whenever a position fully closes ----
-    if prevPositionSize > 0 and strategy.position_size == 0
-        resetSetup()
-    prevPositionSize := strategy.position_size
+    runVwapPullbackLong(vwapPBState, allowedSymbol, dateRangeOK)
+    // Future modules: runMyStrategy(myStrategyState, allowedSymbol, dateRangeOK)
 
 // =============================================================================
-// WARNINGS
+// WARNINGS (shared)
 // =============================================================================
 
 bgcolor(not timeframe.isintraday ? color.new(color.orange, 85) : na, title = "Non-Intraday Warning")
@@ -303,21 +437,22 @@ bgcolor(not timeframe.isintraday ? color.new(color.orange, 85) : na, title = "No
 if barstate.islast and not timeframe.isintraday
     label.new(bar_index, high, "WARNING: designed for 1-5 minute intraday charts only.", style = label.style_label_down, color = color.orange, textcolor = color.white, size = size.small)
 
-if barstate.islast and not allowedSymbol
+if barstate.islast and not isAllowedSymbol(allowOtherSymbolsInput)
     label.new(bar_index, low, "WARNING: symbol is not SPY/QQQ - entries disabled (Allow Other Symbols = false).", style = label.style_label_up, color = color.red, textcolor = color.white, size = size.small)
 
 // =============================================================================
-// VISUALS
+// MODULE: VWAP Pullback Long - Visuals / Reporting
 // =============================================================================
 
-plot(vwapVal,  title = "Session VWAP", color = color.new(color.blue, 0),   linewidth = 2)
-plot(ema9Val,  title = "9 EMA",        color = color.new(color.orange, 0), linewidth = 1)
-plot(ema20Val, title = "20 EMA",       color = color.new(color.purple, 0), linewidth = 1)
+plot(vwapPB_vwapVal,  title = "VWAP Pullback Long: Session VWAP", color = color.new(color.blue, 0),   linewidth = 2)
+plot(vwapPB_ema9Val,  title = "VWAP Pullback Long: 9 EMA",        color = color.new(color.orange, 0), linewidth = 1)
+plot(vwapPB_ema20Val, title = "VWAP Pullback Long: 20 EMA",       color = color.new(color.purple, 0), linewidth = 1)
 
-plot(strategy.position_size > 0 ? stopPrice   : na, title = "Stop Loss",     color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 1)
-plot(strategy.position_size > 0 ? targetPrice : na, title = "Profit Target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
+vwapPB_ownsPosition = strategy.position_size > 0 and activeStrategyId == vwapPBState.id
+plot(vwapPB_ownsPosition ? vwapPBState.stopPrice   : na, title = "VWAP Pullback Long: Stop Loss",     color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 1)
+plot(vwapPB_ownsPosition ? vwapPBState.targetPrice : na, title = "VWAP Pullback Long: Profit Target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
 
-plotshape(impulseMarkerSignal,      title = "Impulse",      style = shape.circle,      location = location.abovebar, color = color.new(color.aqua, 0), size = size.tiny)
-plotshape(pullbackMarkerSignal,     title = "Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
-plotshape(confirmationMarkerSignal, title = "Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
-plotshape(entrySignal,              title = "Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.small)
+plotshape(vwapPB_impulseMarkerSignal,      title = "VWAP Pullback Long: Impulse",      style = shape.circle,      location = location.abovebar, color = color.new(color.aqua, 0),   size = size.tiny)
+plotshape(vwapPB_pullbackMarkerSignal,     title = "VWAP Pullback Long: Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
+plotshape(vwapPB_confirmationMarkerSignal, title = "VWAP Pullback Long: Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0),   size = size.tiny)
+plotshape(vwapPB_entrySignal,              title = "VWAP Pullback Long: Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0),   size = size.small)
