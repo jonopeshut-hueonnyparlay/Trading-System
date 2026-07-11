@@ -78,8 +78,13 @@ strategy(
 // =============================================================================
 
 allowOtherSymbolsInput = input.bool(false, "Allow Other Symbols (default: SPY/QQQ only)", group = "Global Settings")
-startDateInput = input.time(timestamp(2020, 1, 1, 0, 0),    "Backtest Start Date", group = "Backtest Settings")
-endDateInput   = input.time(timestamp(2099, 12, 31, 23, 59), "Backtest End Date",   group = "Backtest Settings")
+// input.time()'s defval must be a compile-time constant, and timestamp(...)
+// calls are never "const" in Pine (even with literal arguments) - so the
+// defaults below are literal Unix millisecond timestamps instead:
+// 1577836800000 = 2020-01-01 00:00 UTC, 4102444740000 = 2099-12-31 23:59 UTC.
+// Change the actual dates via Settings -> Inputs after adding to chart.
+startDateInput = input.time(1577836800000, "Backtest Start Date", group = "Backtest Settings")
+endDateInput   = input.time(4102444740000, "Backtest End Date",   group = "Backtest Settings")
 
 // =============================================================================
 // SHARED TYPES
