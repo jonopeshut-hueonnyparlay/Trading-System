@@ -1,0 +1,323 @@
+//@version=6
+// =============================================================================
+// SPY/QQQ VWAP Pullback Long - Core Version
+//
+// PURPOSE
+//   Backtesting / paper-trading research only. This is NOT investment advice
+//   and is not intended for unattended live trading.
+//
+// ORDER-FILL ASSUMPTIONS (read this before trusting any backtest numbers)
+//   1. Entries: the confirmation candle is evaluated only after it has
+//      CLOSED (barstate.isconfirmed). The entry order is a market order
+//      submitted on that same confirmed bar, and because the strategy is
+//      declared with process_orders_on_close = true, it is filled AT THAT
+//      BAR'S CLOSE (i.e., the confirmation candle's close price), plus the
+//      configured slippage. No future bar's data is used to decide or price
+//      the entry.
+//   2. Stops / targets: submitted immediately after the entry fills, as a
+//      static OCA stop + limit bracket (strategy.exit). TradingView's
+//      broker emulator fills these intrabar, using each subsequent bar's
+//      high/low, exactly like a real resting stop/limit order would. This
+//      is realistic and is NOT lookahead bias because only that bar's own
+//      high/low (which only exist once the bar has printed) are used.
+//   3. Force-close at the end of the entry window: evaluated on confirmed
+//      bars only, so on a 5-minute chart the force-close can occur up to
+//      ~5 minutes after the configured cutoff (the close of the bar that
+//      contains/crosses the cutoff time). See "Known limitations".
+//   4. No higher-timeframe or daily data is requested anywhere (no
+//      request.security calls), so there is no possibility of using a
+//      still-forming daily high/low before it has actually occurred.
+// =============================================================================
+
+strategy(
+     "SPY/QQQ VWAP Pullback Long - Core",
+     shorttitle            = "VWAP Pullback Core",
+     overlay                = true,
+     pyramiding             = 0,
+     initial_capital         = 5000,      // keep in sync with "Simulated Bankroll" input below (see assumptions)
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     currency                = currency.USD,
+     commission_type          = strategy.commission.percent,
+     commission_value         = input.float(0.0, "Commission (%)", minval = 0.0, step = 0.01, group = "Backtest Settings"),
+     slippage                 = input.int(1, "Slippage (ticks)", minval = 0, group = "Backtest Settings"),
+     process_orders_on_close  = true,
+     calc_on_every_tick       = false)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+// --- Symbol filter --------------------------------------------------------
+allowOtherSymbolsInput = input.bool(false, "Allow Other Symbols (default: SPY/QQQ only)", group = "Symbol Filter")
+
+// --- Trading window (America/New_York) ------------------------------------
+entryStartHourInput   = input.int(9,  "Entry Window Start Hour (ET, 24h)",   minval = 0, maxval = 23, group = "Trading Window (ET)")
+entryStartMinuteInput = input.int(45, "Entry Window Start Minute (ET)",      minval = 0, maxval = 59, group = "Trading Window (ET)")
+entryEndHourInput     = input.int(11, "Entry Window End / Force-Close Hour (ET, 24h)", minval = 0, maxval = 23, group = "Trading Window (ET)")
+entryEndMinuteInput   = input.int(15, "Entry Window End / Force-Close Minute (ET)",    minval = 0, maxval = 59, group = "Trading Window (ET)")
+
+// --- Indicators -------------------------------------------------------------
+ema9LenInput  = input.int(9,  "Fast EMA Length",  minval = 1, group = "Indicators")
+ema20LenInput = input.int(20, "Slow EMA Length",  minval = 1, group = "Indicators")
+atrLenInput   = input.int(14, "ATR Length",       minval = 1, group = "Indicators")
+
+// --- Impulse ------------------------------------------------------------
+impulsePricePctInput = input.float(0.15, "Impulse: Min % High Above VWAP",         minval = 0.0, step = 0.01, group = "Impulse")
+impulseAtrMultInput  = input.float(0.5,  "Impulse: Min ATR Multiple High Above VWAP", minval = 0.0, step = 0.05, group = "Impulse")
+
+// --- Pullback -----------------------------------------------------------
+pullbackMaxBarsInput         = input.int(15,   "Pullback: Max Bars After Impulse",        minval = 1, group = "Pullback")
+pullbackTolerancePctInput    = input.float(0.10, "Pullback: Low Proximity to VWAP (%)",     minval = 0.0, step = 0.01, group = "Pullback")
+pullbackMaxCloseBelowPctInput = input.float(0.05, "Pullback: Max Candle Close Below VWAP (%)", minval = 0.0, step = 0.01, group = "Pullback")
+invalidationPctInput          = input.float(0.20, "Invalidation: Material Close Below VWAP (%)", minval = 0.0, step = 0.01, group = "Pullback")
+
+// --- Confirmation ---------------------------------------------------------
+confirmMinBodyPctInput = input.float(50, "Confirmation: Min Body % of Bar Range", minval = 0, maxval = 100, step = 1, group = "Confirmation")
+
+// --- Stop loss ------------------------------------------------------------
+maxStopDistancePctInput = input.float(0.30, "Max Stop Distance (% of Entry Price)", minval = 0.01, step = 0.01, group = "Stop Loss")
+
+// --- Profit target --------------------------------------------------------
+targetRMultipleInput = input.float(2.0, "Target R Multiple", minval = 0.1, step = 0.1, group = "Profit Target")
+
+// --- Position sizing --------------------------------------------------------
+bankrollInput      = input.float(5000, "Simulated Bankroll ($) - keep in sync with Initial Capital property", minval = 1, group = "Position Sizing")
+maxRiskDollarsInput = input.float(25,   "Max Risk Per Trade ($)", minval = 1, group = "Position Sizing")
+maxTradeValueInput  = input.float(5000, "Max Trade Value ($)",    minval = 1, group = "Position Sizing")
+
+// --- Daily limits -----------------------------------------------------------
+maxTradesPerDayInput       = input.int(2,  "Max Trades Per Day",              minval = 1, group = "Daily Limits")
+maxLosingTradesPerDayInput = input.int(2,  "Max Losing Trades Per Day",       minval = 1, group = "Daily Limits")
+maxDailyLossDollarsInput   = input.float(50, "Max Daily Realized Loss ($)",   minval = 1, group = "Daily Limits")
+
+// --- Backtest date range ------------------------------------------------
+startDateInput = input.time(timestamp(2020, 1, 1, 0, 0),   "Backtest Start Date", group = "Backtest Settings")
+endDateInput   = input.time(timestamp(2099, 12, 31, 23, 59), "Backtest End Date",   group = "Backtest Settings")
+
+// =============================================================================
+// INDICATORS (recalculated every tick for smooth plotting; no trading
+// decision is made off these until the confirmed-bar gate below)
+// =============================================================================
+
+vwapVal  = ta.vwap(hlc3)
+ema9Val  = ta.ema(close, ema9LenInput)
+ema20Val = ta.ema(close, ema20LenInput)
+atrVal   = ta.atr(atrLenInput)
+
+// =============================================================================
+// SESSION / TIMEZONE HANDLING (explicit America/New_York)
+// =============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etYear   = year(time, "America/New_York")
+etMonth  = month(time, "America/New_York")
+etDay    = dayofmonth(time, "America/New_York")
+
+etMinutesOfDay = etHour * 60 + etMinute
+windowStartMin = entryStartHourInput * 60 + entryStartMinuteInput
+windowEndMin   = entryEndHourInput * 60 + entryEndMinuteInput
+
+inEntryWindow  = etMinutesOfDay >= windowStartMin and etMinutesOfDay < windowEndMin
+forceCloseTime = etMinutesOfDay >= windowEndMin
+
+dayId  = etYear * 10000 + etMonth * 100 + etDay
+dateRangeOK = time >= startDateInput and time <= endDateInput
+
+allowedSymbol = allowOtherSymbolsInput or syminfo.ticker == "SPY" or syminfo.ticker == "QQQ"
+
+// =============================================================================
+// STATE MACHINE VARIABLES
+//   0 = Waiting for bullish trend
+//   1 = Waiting for impulse
+//   2 = Waiting for pullback
+//   3 = Waiting for confirmation
+//   4 = Trade active
+// Invalidation / expiration are transient events that immediately fall
+// back to state 0 (they are not held as a persistent state).
+// =============================================================================
+
+var int   state           = 0
+var float impulseHigh     = na
+var int   impulseBarIdx   = na
+var float pullbackLow     = na
+var bool  pullbackValid   = false
+
+var float entryPrice      = na
+var float stopPrice       = na
+var float targetPrice     = na
+var float lastRiskDollars = na
+
+var int   lastDayId              = na
+var int   dayClosedTrades        = 0
+var int   dayLosingTrades        = 0
+var float dayRealizedPnL         = 0.0
+var bool  dayHitBigWin           = false
+var int   prevClosedTradesCount  = 0
+var float prevPositionSize       = 0.0
+
+resetSetup() =>
+    state         := 0
+    impulseHigh   := na
+    impulseBarIdx := na
+    pullbackLow   := na
+    pullbackValid := false
+
+// Per-bar signal flags used only for chart markers (recomputed every bar)
+impulseMarkerSignal      = false
+pullbackMarkerSignal     = false
+confirmationMarkerSignal = false
+entrySignal              = false
+
+// =============================================================================
+// MAIN LOGIC - confirmed bars only (no repainting, no lookahead)
+// =============================================================================
+
+if barstate.isconfirmed
+
+    // --- New Eastern Time trading day: reset daily counters and setup ------
+    newDay = na(lastDayId) or dayId != lastDayId
+    if newDay
+        dayClosedTrades := 0
+        dayLosingTrades := 0
+        dayRealizedPnL  := 0.0
+        dayHitBigWin    := false
+        resetSetup()
+        lastDayId := dayId
+
+    // --- Force-close any open trade at the end of the entry window ---------
+    if strategy.position_size > 0 and forceCloseTime
+        strategy.close("Long", comment = "Force Close (Window End)")
+
+    // --- Session end: no more entries possible today, kill a pending setup -
+    if forceCloseTime and state != 4
+        resetSetup()
+
+    // --- Bullish trend gate --------------------------------------------------
+    trendOK = close > vwapVal and vwapVal > vwapVal[1] and ema9Val > ema20Val
+
+    // --- State machine (advances at most one stage per bar) -----------------
+    if state == 0
+        if trendOK
+            state := 1
+
+    else if state == 1
+        if not trendOK
+            resetSetup()
+        else
+            impulseNow = high >= vwapVal * (1 + impulsePricePctInput / 100) or high >= vwapVal + impulseAtrMultInput * atrVal
+            if impulseNow
+                impulseHigh   := high
+                impulseBarIdx := bar_index
+                pullbackLow   := na
+                pullbackValid := false
+                impulseMarkerSignal := true
+                state := 2
+
+    else if state == 2
+        barsSinceImpulse = bar_index - impulseBarIdx
+        if barsSinceImpulse > pullbackMaxBarsInput
+            resetSetup()
+        else if close <= vwapVal * (1 - invalidationPctInput / 100)
+            resetSetup()
+        else
+            lowNearVwap = math.abs(low - vwapVal) <= vwapVal * (pullbackTolerancePctInput / 100)
+            closeOK     = close >= vwapVal * (1 - pullbackMaxCloseBelowPctInput / 100)
+            if lowNearVwap and closeOK
+                pullbackLow  := low
+                pullbackValid := true
+                pullbackMarkerSignal := true
+                state := 3
+
+    else if state == 3
+        pullbackLow := math.min(pullbackLow, low)
+        barsSinceImpulse = bar_index - impulseBarIdx
+        if barsSinceImpulse > pullbackMaxBarsInput
+            resetSetup()
+        else if close <= vwapVal * (1 - invalidationPctInput / 100)
+            resetSetup()
+        else
+            bodyRange = high - low
+            bodySize  = math.abs(close - open)
+            bodyOK    = bodyRange > 0 and (bodySize / bodyRange) >= (confirmMinBodyPctInput / 100)
+            confirmPattern = close > open and close > high[1] and close > vwapVal and bodyOK
+
+            if confirmPattern
+                confirmationMarkerSignal := true
+
+                candidateEntryPrice = close
+                candidateStop  = pullbackLow - math.max(syminfo.mintick, candidateEntryPrice * 0.0001)
+                candidateRisk  = candidateEntryPrice - candidateStop
+                stopDistPct    = candidateEntryPrice > 0 ? (candidateRisk / candidateEntryPrice * 100) : 100.0
+                riskValid      = candidateStop < candidateEntryPrice and candidateRisk > 0 and stopDistPct <= maxStopDistancePctInput
+
+                canTradeToday = dayClosedTrades < maxTradesPerDayInput and dayLosingTrades < maxLosingTradesPerDayInput and dayRealizedPnL > -maxDailyLossDollarsInput and not dayHitBigWin
+
+                allowedToTrade = allowedSymbol and timeframe.isintraday and inEntryWindow and dateRangeOK and canTradeToday
+
+                if riskValid and allowedToTrade
+                    sharesByRisk    = math.floor(maxRiskDollarsInput / candidateRisk)
+                    sharesByCapital = math.floor(maxTradeValueInput / candidateEntryPrice)
+                    shares = math.min(sharesByRisk, sharesByCapital)
+
+                    if shares >= 1
+                        entryPrice      := candidateEntryPrice
+                        stopPrice       := candidateStop
+                        targetPrice     := candidateEntryPrice + targetRMultipleInput * candidateRisk
+                        lastRiskDollars := candidateRisk * shares
+
+                        strategy.entry("Long", strategy.long, qty = shares)
+                        strategy.exit("Exit", from_entry = "Long", stop = stopPrice, limit = targetPrice)
+
+                        entrySignal := true
+                        state := 4
+                    else
+                        resetSetup()
+                else
+                    resetSetup()
+
+    // --- Daily accounting: only count trades that have actually closed -----
+    if strategy.closedtrades > prevClosedTradesCount
+        for i = prevClosedTradesCount to strategy.closedtrades - 1
+            tradeProfit = strategy.closedtrades.profit(i)
+            dayRealizedPnL += tradeProfit
+            dayClosedTrades += 1
+            if tradeProfit <= 0
+                dayLosingTrades += 1
+            if not na(lastRiskDollars) and lastRiskDollars > 0 and (tradeProfit / lastRiskDollars) >= targetRMultipleInput
+                dayHitBigWin := true
+        prevClosedTradesCount := strategy.closedtrades
+
+    // --- Reset the setup state machine whenever a position fully closes ----
+    if prevPositionSize > 0 and strategy.position_size == 0
+        resetSetup()
+    prevPositionSize := strategy.position_size
+
+// =============================================================================
+// WARNINGS
+// =============================================================================
+
+bgcolor(not timeframe.isintraday ? color.new(color.orange, 85) : na, title = "Non-Intraday Warning")
+
+if barstate.islast and not timeframe.isintraday
+    label.new(bar_index, high, "WARNING: designed for 1-5 minute intraday charts only.", style = label.style_label_down, color = color.orange, textcolor = color.white, size = size.small)
+
+if barstate.islast and not allowedSymbol
+    label.new(bar_index, low, "WARNING: symbol is not SPY/QQQ - entries disabled (Allow Other Symbols = false).", style = label.style_label_up, color = color.red, textcolor = color.white, size = size.small)
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+
+plot(vwapVal,  title = "Session VWAP", color = color.new(color.blue, 0),   linewidth = 2)
+plot(ema9Val,  title = "9 EMA",        color = color.new(color.orange, 0), linewidth = 1)
+plot(ema20Val, title = "20 EMA",       color = color.new(color.purple, 0), linewidth = 1)
+
+plot(strategy.position_size > 0 ? stopPrice   : na, title = "Stop Loss",     color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 1)
+plot(strategy.position_size > 0 ? targetPrice : na, title = "Profit Target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
+
+plotshape(impulseMarkerSignal,      title = "Impulse",      style = shape.circle,      location = location.abovebar, color = color.new(color.aqua, 0), size = size.tiny)
+plotshape(pullbackMarkerSignal,     title = "Pullback",     style = shape.circle,      location = location.belowbar, color = color.new(color.yellow, 0), size = size.tiny)
+plotshape(confirmationMarkerSignal, title = "Confirmation", style = shape.diamond,     location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
+plotshape(entrySignal,              title = "Entry",        style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.small)
