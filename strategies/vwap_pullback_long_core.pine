@@ -52,6 +52,12 @@
 //      still-forming daily high/low before it has actually occurred.
 // =============================================================================
 
+// commission_value and slippage below must be compile-time constants - Pine
+// does not allow input.*() calls for these two strategy() arguments (unlike
+// most other parameters). Adjust them for your own broker/fill assumptions
+// directly here, or override per-run via the Strategy Tester's
+// Properties tab (Commission / Slippage fields), which does not require
+// editing the script.
 strategy(
      "Trading System - Intraday Long Framework",
      shorttitle              = "Intraday Long Framework",
@@ -62,8 +68,8 @@ strategy(
      default_qty_value         = 1,
      currency                  = currency.USD,
      commission_type            = strategy.commission.percent,
-     commission_value           = input.float(0.0, "Commission (%)", minval = 0.0, step = 0.01, group = "Backtest Settings"),
-     slippage                   = input.int(1, "Slippage (ticks)", minval = 0, group = "Backtest Settings"),
+     commission_value           = 0.0,      // % per trade - edit here or in Properties tab
+     slippage                   = 1,        // ticks per fill - edit here or in Properties tab
      process_orders_on_close    = true,
      calc_on_every_tick         = false)
 

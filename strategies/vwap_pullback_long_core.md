@@ -24,9 +24,11 @@ independent modules without touching or risking the VWAP Pullback logic.
   - Utility functions: `isAllowedSymbol`, `inBacktestRange`,
     `canOpenNewPosition`, `calcPositionSize`, `minStopBuffer`,
     `etMinutesOfDay`, `etDayId`.
-  - Global settings: **Allow Other Symbols**, and the backtest
-    commission/slippage/date-range inputs — these are account/broker-level
-    concerns shared by any module.
+  - Global settings: **Allow Other Symbols** and the backtest date-range
+    inputs — these are account/broker-level concerns shared by any module.
+    Commission and slippage are set as constants in the `strategy()`
+    declaration itself rather than as inputs (Pine requires these two
+    specific arguments to be compile-time constants) — see Assumptions.
 - **The VWAP Pullback Long module** (setup id `"VWAPPullbackLong"`) owns:
   - its own `Enable VWAP Pullback Long` input (default `true`) and all of its
     own thresholds, each grouped under `VWAP Pullback Long: ...` in Settings;
@@ -197,9 +199,16 @@ still open at 11:15 AM ET is force-closed at market.
   so the two can't be wired together automatically). If you change the
   Bankroll input, also update the "Initial Capital" field in the Strategy
   Tester's Properties tab to match.
-- **Commission default is 0.0%**, reflecting that most US retail brokers no
-  longer charge commissions on SPY/QQQ share trades; adjust to your actual
-  broker's rate for a more conservative test.
+- **Commission and slippage are not Pine inputs.** `strategy()`'s
+  `commission_value` and `slippage` arguments must be compile-time
+  constants in Pine — passing an `input.float()`/`input.int()` call there
+  is a compile error (`CE10123`), unlike most other `strategy()`
+  arguments. They're set as plain constants instead: 0.0% commission
+  (reflecting that most US retail brokers no longer charge commissions on
+  SPY/QQQ share trades) and 1 tick of slippage. To change them, either
+  edit the two literals directly in the `strategy()` declaration near the
+  top of the script, or override them per-run in the Strategy Tester's
+  **Properties** tab, which doesn't require editing code.
 - **EMA lengths (9/20) and ATR length (14)** are exposed as inputs even
   though the spec didn't explicitly ask for them to be configurable, purely
   for convenience — defaults match the spec exactly.
