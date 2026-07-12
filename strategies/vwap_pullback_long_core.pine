@@ -487,8 +487,8 @@ runVwapPullbackLong(state, runtime, allowedSymbol, dateRangeOK, isConfirmed) =>
                             shares = calcPositionSize(candidateEntryPrice, candidateRisk, vwapPB_maxRiskDollarsInput, vwapPB_maxTradeValueInput)
                             if shares >= 1
                                 targetPx = vwapPB_calcTarget(candidateEntryPrice, candidateRisk)
-                                vwapPB_executeEntry(state, runtime, candidateEntryPrice, candidateStop, targetPx, shares)
                                 state.entrySignal := true
+                                vwapPB_executeEntry(state, runtime, candidateEntryPrice, candidateStop, targetPx, shares)
                             else
                                 vwapPB_resetSetup(state)
                         else
