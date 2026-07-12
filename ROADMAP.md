@@ -197,23 +197,334 @@ implemented until one of these is picked and confirmed.**
   get a meaningful sample size in a reasonable testing window (the core
   strategy's ~1 trade/3-4 days is already on the sparse side).
 
-### Candidate ideas for SPY/QQQ intraday (unranked, pick one to start)
-- **Short-side mirror of VWAP Pullback Long** — the same trend/impulse/
-  pullback/confirmation logic, inverted for downtrends. Lowest-effort
-  candidate since it reuses almost the entire existing framework and rule
-  structure; good complement on bearish/red days where the long-only module
-  never fires.
-- **Opening Range Breakout (ORB)** — trade a breakout of the first N-minute
-  range (commonly 5 or 15) in the breakout direction. Trades right at the
-  open (9:30-9:45), a window the current strategy explicitly excludes.
-- **VWAP Reversion / Fade** — the mean-reversion counterpart to the current
-  trend-continuation approach: fade price back toward VWAP when it's
-  extended too far without a clean trend behind it.
-- **Power Hour momentum** — trend-continuation in the last hour of the
-  session (3:00-4:00 PM ET), a completely different time-of-day exposure
-  than the current 9:45-11:15 window.
-- **Gap fill / gap-and-go** — rules based on overnight gap behavior in the
-  first few minutes of the session.
+### Full backlog: it's ~20-25 core edges, not ~400 strategies
+
+A full brain-dump of candidate strategy names was collected (preserved in
+full further down). Read literally it's 400+ items, but almost all of that
+is the same underlying handful of edges repeated across three axes:
+
+- **Instrument**: the identical pattern traded on SPY vs. QQQ vs. ES vs. NQ
+  vs. gold vs. a single stock is one edge, not five.
+- **Direction**: a "long" version and its "short"/"put" mirror are one edge
+  expressed two ways, not two edges.
+- **Expression vehicle**: the same directional or volatility view expressed
+  as stock, futures, or one of a dozen options structures is one view, not
+  a dozen views.
+
+Collapsing along those three axes, the backlog is really this set of core
+edges:
+
+**Directional / continuation (equities, ETFs, futures)**
+VWAP pullback/reclaim/rejection, opening-range breakout/breakdown/retest/
+failure (incl. Initial Balance variants), moving-average pullback, trend-day
+continuation, flag/pennant/triangle/wedge continuation, higher-low /
+lower-high continuation, level breakout-and-retest (HOD/LOD, prior day
+high/low, premarket high/low, horizontal S/R, overnight high/low, Globex
+high/low), gap-and-go.
+
+**Mean reversion / fade (equities, ETFs, futures)**
+VWAP mean reversion, anchored VWAP reversion, Bollinger Band reversion, RSI
+overbought/oversold reversion, extension fade, failed-breakout/failed-
+breakdown fade-and-reclaim, exhaustion/climactic reversal, stop-hunt /
+liquidity-sweep reversal, bull-trap fade / bear-trap reclaim, gap fade/fill/
+hold/reclaim, prior-close and range-midpoint reversion.
+
+**Relative value / momentum (needs multiple symbols)**
+Relative strength/weakness (single name or sector vs. index), SPY-vs-QQQ or
+ES-vs-NQ divergence, sector/breadth confirmation (TICK, ADD, VOLD), pairs
+trading, cointegration, index/ETF/futures arbitrage, merger/convertible
+arbitrage, cash-and-carry / basis trade.
+
+**Market/volume profile (needs profile charting)**
+Value area breakout/rejection/rotation, point-of-control reversion/
+rejection, high/low-volume node reversion/breakout, single prints, poor
+high/low reversal, balanced-day vs. trend-day rotation.
+
+**Order flow / tape (needs Level 2 / DOM / footprint data)**
+Absorption, iceberg detection, cumulative delta divergence, footprint/
+stacked imbalance, large-lot tracking, DOM and time-and-sales scalping.
+
+**Futures-specific structure**
+Per-product directional (ES/NQ/RTY/YM and micros, metals, energy, grains,
+livestock, rates, FX, crypto, VIX), intramarket/intermarket/intercommodity
+spreads (crack, crush, spark, TED, yield-curve, calendar), contango/
+backwardation, session-based (Globex/London/NY-open/Power-Hour), and macro
+event-driven (FOMC, CPI, NFP, inventory reports).
+
+**Options structures (full spectrum)**
+Directional (long call/put, stock+option combos), income (covered call,
+cash-secured put, the wheel), protective (protective put/call, collars),
+vertical spreads (bull/bear, debit/credit), straddles/strangles/guts,
+calendars and diagonals (incl. poor man's covered call), butterflies and
+condors (incl. iron variants and broken-wing), ratio spreads/backspreads,
+synthetics and parity trades (conversion, reversal, box spread), LEAPS
+strategies, position-rolling techniques, volatility/greeks trades (vega,
+theta, delta-neutral, gamma scalping, skew/term-structure, IV rank), and the
+earnings-specific and 0DTE versions of most of the above.
+
+### Practical note on tooling (not a restriction — just what tests where)
+- Directional/mean-reversion/level/profile edges on **equities, ETFs, and
+  futures** (continuous contracts like `ES1!`, `NQ1!`) can all be prototyped
+  in Pine Script the same way the current module was, using
+  `request.security()` for the relative-value ones that need a second symbol.
+- **Options structures** generally can't be realistically backtested inside
+  a Pine `strategy()` — Pine has no native options-chain, greeks, or IV
+  surface data. Researching these means either paper-tracking them manually,
+  or using an options-specific backtesting platform/broker analytics tool
+  outside this repo.
+- **Order-flow/DOM/footprint** edges need Level 2 or tick-level data Pine's
+  standard feeds don't expose — these need a different platform (e.g. a DOM/
+  footprint tool) to research at all, not just to trade.
+- None of this changes what gets *traded* — it's just about which edges this
+  repo's current toolchain can actually validate versus which need a
+  different tool to even research properly.
+
+<details>
+<summary>Full raw list as originally provided (unedited, for reference)</summary>
+
+VWAP Pullback, VWAP Reclaim, VWAP Rejection, VWAP Mean Reversion, Anchored
+VWAP Strategy, Opening Range Breakout, Opening Range Breakdown, Opening
+Range Retest, Opening Range Failure, Trend Pullback, Moving Average
+Pullback, Breakout Pullback, Higher Low Continuation, Lower High
+Continuation, Horizontal Level Breakout, High-of-Day Breakout, Low-of-Day
+Breakdown, Pre-Market High Breakout, Pre-Market Low Breakdown, Range
+Breakout, Consolidation Breakout, Triangle/Pennant Breakout, Resistance
+Break and Retest, Support Break and Retest, Previous Day High Retest,
+Previous Day Low Retest, Previous Close Reclaim/Reject, Support Bounce,
+Resistance Rejection, Range Trading, Previous Day Level Bounce, Premarket
+Level Bounce, VWAP Reversion, Bollinger Band Reversion, RSI Overbought/
+Oversold Reversion, Gap Fill, Extension Fade, Failed Breakout Fade, Gap and
+Go, Gap Fade, Gap Hold, Gap Reclaim, Relative Strength Long, Relative
+Weakness Short, Sector Relative Strength, SPY vs QQQ Divergence, Pair
+Relative Value, Intraday Trend Following, Moving Average Trend, Higher High
+/ Higher Low Trend, Lower Low / Lower High Trend, Trend Day Strategy, High
+Relative Volume Momentum, News Momentum, Earnings Momentum, Analyst
+Upgrade/Downgrade Momentum, Sector Momentum, Stop Hunt Reversal, Liquidity
+Sweep Long, Liquidity Sweep Short, Failed Breakdown Reclaim, Failed Breakout
+Rejection, Level 2 Scalping, Time & Sales Momentum, Absorption, Iceberg
+Detection, Cumulative Delta Divergence, Breadth Confirmation, Tick Index
+Strategy, VOLD / ADD Confirmation, Sector Confirmation, Pairs Trading, ETF
+Component Arbitrage, Index Futures vs ETF Arbitrage, Mean Reversion Basket,
+Cointegration Strategy, Latency Arbitrage, Merger Arbitrage, Convertible
+Arbitrage, Options Put-Call Parity Arbitrage, Crypto Exchange Arbitrage,
+Long Call, Long Put, Buying Index Calls, Buying Index Puts, Long Stock +
+Long Put, Short Stock + Long Call, Covered Call, Covered Put, Cash-Secured
+Put, Cash-Backed Call, Naked Call, Naked Put, Protective Put, Protective
+Call, Protective Collar, Collar, Zero-Cost Collar, Ratio Collar, Put Spread
+Collar, Call Spread Collar, Bull Call Spread, Bull Put Spread, Bear Call
+Spread, Bear Put Spread, Debit Call Spread, Debit Put Spread, Credit Call
+Spread, Credit Put Spread, Vertical Call Spread, Vertical Put Spread, Long
+Vertical Spread, Short Vertical Spread, At-The-Money Vertical, In-The-Money
+Vertical, Out-Of-The-Money Vertical, Broken-Wing Vertical, Long Straddle,
+Short Straddle, Long Strangle, Short Strangle, Covered Strangle, Covered
+Combination, Guts, Short Guts, Long Guts, Long Call Calendar Spread, Long
+Put Calendar Spread, Short Call Calendar Spread, Short Put Calendar Spread,
+Double Calendar Spread, Calendar Spread, Calendar Straddle, Calendar
+Strangle, Weekly Calendar Spread, Monthly Calendar Spread, Earnings Calendar
+Spread, Reverse Calendar Spread, Call Diagonal Spread, Put Diagonal Spread,
+Double Diagonal Spread, Diagonal Spread, Poor Man's Covered Call, Poor Man's
+Covered Put, Diagonal Covered Call, Diagonal Put Spread, Reverse Diagonal
+Spread, Long Call Butterfly, Long Put Butterfly, Short Call Butterfly, Short
+Put Butterfly, Long Iron Butterfly, Short Iron Butterfly, Iron Butterfly,
+Broken-Wing Butterfly, Call Broken-Wing Butterfly, Put Broken-Wing
+Butterfly, Unbalanced Butterfly, Skip-Strike Butterfly, Christmas Tree
+Butterfly, Ratio Butterfly, Long Call Condor, Long Put Condor, Short Call
+Condor, Short Put Condor, Long Iron Condor, Short Iron Condor, Iron Condor,
+Narrow Iron Condor, Wide Iron Condor, Unbalanced Iron Condor, Broken-Wing
+Condor, Reverse Iron Condor, Call Ratio Spread, Put Ratio Spread, Call Ratio
+Backspread, Put Ratio Backspread, 1x2 Call Ratio Spread, 1x2 Put Ratio
+Spread, 1x3 Call Ratio Spread, 1x3 Put Ratio Spread, Covered Ratio Spread,
+Uncovered Ratio Spread, Ratio Spread, Backspread, Frontspread, Synthetic
+Long Stock, Synthetic Short Stock, Synthetic Long Call, Synthetic Short
+Call, Synthetic Long Put, Synthetic Short Put, Synthetic Covered Call,
+Synthetic Cash-Secured Put, Conversion, Reversal, Box Spread, Long Box
+Spread, Short Box Spread, Jelly Roll, Put-Call Parity Arbitrage, LEAPS Long
+Call, LEAPS Long Put, LEAPS Covered Call, LEAPS Poor Man's Covered Call,
+LEAPS Diagonal, LEAPS Protective Put, Stock Replacement With LEAPS, Covered
+Call Roll, Cash-Secured Put Roll, Vertical Spread Roll, Calendar Roll,
+Diagonal Roll, Iron Condor Roll, Straddle Roll, Strangle Roll, Collar Roll,
+Rolling Up, Rolling Down, Rolling Out, Rolling In, Rolling Up and Out,
+Rolling Down and Out, Stock Repair Strategy, Married Put, Covered Call
+Income, Buy-Write, Overwrite Strategy, Put-Write, Wheel Strategy, Covered
+Wheel, Dividend Capture With Options, Early Assignment Strategy, Long
+Volatility Trade, Short Volatility Trade, Vega Trade, Theta Decay Trade,
+Delta-Neutral Trade, Gamma Scalping, Delta Hedging, Dynamic Hedging,
+Volatility Skew Trade, Volatility Smile Trade, Term Structure Trade, IV Rank
+Trade, IV Percentile Trade, Volatility Crush Trade, Volatility Expansion
+Trade, Long Vega Calendar, Short Vega Calendar, Variance Risk Premium
+Strategy, Earnings Long Call, Earnings Long Put, Earnings Long Straddle,
+Earnings Long Strangle, Earnings Short Straddle, Earnings Short Strangle,
+Earnings Iron Condor, Earnings Iron Butterfly, Earnings IV Crush,
+Post-Earnings Drift Options, Pre-Earnings Run-Up Options, Post-Earnings Gap
+Fill Options, 0DTE Long Call, 0DTE Long Put, 0DTE Debit Spread, 0DTE Credit
+Spread, 0DTE Iron Condor, 0DTE Iron Butterfly, 0DTE Straddle, 0DTE Strangle,
+0DTE Gamma Scalping, 0DTE Momentum Scalping, 0DTE Mean Reversion, 0DTE VWAP
+Reclaim, 0DTE Opening Range Breakout, 0DTE Power Hour Options, Index Options
+Scalping, SPX Options Scalping, SPY Options Scalping, QQQ Options Scalping,
+NDX Options Scalping, XSP Options, RUT Options, VIX Options, VIX Call
+Spread, VIX Put Spread, VIX Calendar Spread, VIX Futures Options Strategy,
+Sector ETF Options, Single-Stock Options, ETF Options, Index Options, Weekly
+Options, Monthly Options, Quarterly Options, AM-Settled Index Options,
+PM-Settled Index Options, Long Call Momentum, Long Put Momentum, Call
+Breakout, Put Breakdown, Call Pullback, Put Pullback, Call VWAP Pullback,
+Put VWAP Rejection, Call Opening Range Breakout, Put Opening Range
+Breakdown, Call Break and Retest, Put Support Break and Retest, Call Trend
+Continuation, Put Trend Continuation, Call Relative Strength, Put Relative
+Weakness, Credit Spread Income, Iron Condor Income, Iron Butterfly Income,
+Covered Call Income, Cash-Secured Put Income, Calendar Income, Diagonal
+Income, Theta Portfolio, Premium Selling Basket, Defined-Risk Premium
+Selling, Undefined-Risk Premium Selling, Long Futures, Short Futures,
+Outright Futures Trade, Directional Futures Trade, Trend-Following Futures,
+Countertrend Futures, Momentum Futures, Mean-Reversion Futures, Breakout
+Futures, Pullback Futures, Range Futures, Scalping Futures, Swing Futures,
+Position Futures, Macro Futures, ES Long, ES Short, NQ Long, NQ Short, YM
+Long, YM Short, RTY Long, RTY Short, MES Long, MES Short, MNQ Long, MNQ
+Short, MYM Long, MYM Short, M2K Long, M2K Short, ES VWAP Pullback, NQ VWAP
+Pullback, MES VWAP Pullback, MNQ VWAP Pullback, ES VWAP Reclaim, NQ VWAP
+Reclaim, ES VWAP Rejection, NQ VWAP Rejection, ES VWAP Mean Reversion, NQ
+VWAP Mean Reversion, Anchored VWAP Futures Strategy, 5-Minute ORB, 15-Minute
+ORB, 30-Minute ORB, Initial Balance Breakout, Initial Balance Rejection,
+Initial Balance Rotation, Initial Balance Extension, Opening Drive, Opening
+Reversal, Open Test Drive, Open Rejection Reverse, Previous Close Reclaim,
+Previous Close Rejection, Overnight High Breakout, Overnight High Rejection,
+Overnight Low Breakdown, Overnight Low Reclaim, Globex High Retest, Globex
+Low Retest, Regular Trading Hours High Breakout, Regular Trading Hours Low
+Breakdown, 9 EMA Pullback, 20 EMA Pullback, 50 SMA Pullback, Trend Day
+Continuation, Trend Day Pullback, Trend Day Late-Day Continuation,
+Two-Legged Pullback, ABC Pullback, Flag Continuation, Bull Flag Futures,
+Bear Flag Futures, Range Breakdown, Triangle Breakout, Wedge Breakout,
+Pennant Breakout, Inside Bar Breakout, Outside Bar Continuation, Failed
+Breakout, Failed Breakdown, Breakdown Pullback, Prior High Bounce, Prior Low
+Bounce, Prior Close Bounce, Overnight Midpoint Bounce, Range Support Long,
+Range Resistance Short, VWAP Support Bounce, VWAP Resistance Rejection,
+Prior Close Reversion, Overnight Midpoint Reversion, Value Area Mean
+Reversion, Point of Control Reversion, Opening Range Midpoint Reversion,
+Exhaustion Fade, Climactic Reversal, Blow-Off Top Short, Panic Flush Long,
+Buy-Side Liquidity Sweep, Sell-Side Liquidity Sweep, Swing Failure Pattern,
+High Sweep Reversal, Low Sweep Reversal, Trap Long, Trap Short, Bull Trap
+Fade, Bear Trap Reclaim, Market Profile Value Area Breakout, Market Profile
+Value Area Rejection, Market Profile Value Area Rotation, Value Area High
+Rejection, Value Area Low Reclaim, Point of Control Rejection, Volume
+Profile High-Volume Node Reversion, Volume Profile Low-Volume Node
+Breakout, Single Prints Continuation, Poor High Reversal, Poor Low Reversal,
+Excess High Fade, Excess Low Fade, Balanced Day Rotation, Trend Day Profile
+Continuation, Double Distribution Day Strategy, Order Flow Absorption, Bid
+Absorption, Ask Absorption, Delta Divergence, Cumulative Delta Reversal,
+Footprint Imbalance, Stacked Imbalance Continuation, Order Flow Reversal,
+Order Flow Momentum, Iceberg Absorption, Tape Reading Scalp, Large Lot
+Tracking, Market Buy Imbalance, Market Sell Imbalance, DOM Scalping, Level 2
+Futures Scalping, Time and Sales Scalping, Breadth Confirmation Futures,
+NYSE TICK Futures Strategy, ADD Confirmation, VOLD Confirmation, Market
+Internals Trend Confirmation, ES/NQ Divergence, NQ Leading ES, ES Leading
+NQ, RTY Risk-On Confirmation, Dow Confirmation, Semiconductor Confirmation
+for NQ, Treasury Yield Confirmation, Dollar Confirmation, VIX Confirmation,
+ES/NQ Relative Strength, ES/YM Spread, NQ/ES Spread, RTY/ES Spread, RTY/NQ
+Spread, Dow/Nasdaq Rotation, Small Cap vs Large Cap Futures, Growth vs Value
+Futures Proxy, Risk-On / Risk-Off Futures Pair, Futures Spread Trading,
+Intramarket Calendar Spread, Intermarket Spread, Intercommodity Spread,
+Crack Spread, Crush Spread, Spark Spread, TED Spread, Treasury Yield Curve
+Spread, Commodity Calendar Spread, Bull Calendar Spread, Bear Calendar
+Spread, Nearby vs Deferred Spread, Front-Month / Back-Month Spread, Roll
+Yield Strategy, Contango Strategy, Backwardation Strategy, ES Calendar
+Spread, NQ Calendar Spread, Crude Oil Calendar Spread, Natural Gas Calendar
+Spread, Gold Calendar Spread, Silver Calendar Spread, Copper Calendar
+Spread, Corn Calendar Spread, Soybean Calendar Spread, Wheat Calendar
+Spread, Live Cattle Calendar Spread, Treasury Futures Calendar Spread, Crude
+Oil Futures Long, Crude Oil Futures Short, Crude Oil Breakout, Crude Oil
+Inventory Report Strategy, Crude Oil Gap Fill, Crude Oil Calendar Spread,
+Crude Oil Crack Spread, Brent/WTI Spread, Heating Oil Spread, RBOB Gasoline
+Spread, Natural Gas Futures Long, Natural Gas Futures Short, Natural Gas
+Weather Trade, Natural Gas Inventory Strategy, Natural Gas Calendar Spread,
+Gold Futures Long, Gold Futures Short, Silver Futures Long, Silver Futures
+Short, Copper Futures Long, Copper Futures Short, Gold/Silver Ratio Trade,
+Gold/Copper Ratio Trade, Metals Breakout, Metals Mean Reversion,
+Dollar-Confirmed Gold Trade, Rate-Confirmed Gold Trade, Corn Futures Long,
+Corn Futures Short, Soybean Futures Long, Soybean Futures Short, Wheat
+Futures Long, Wheat Futures Short, Soybean Crush Spread, Corn/Wheat Spread,
+Corn/Soybean Spread, Old Crop / New Crop Spread, Weather-Driven Grain Trade,
+USDA Report Strategy, Crop Progress Strategy, Seasonal Grain Spread, Live
+Cattle Futures, Feeder Cattle Futures, Lean Hog Futures, Cattle Crush
+Spread, Livestock Seasonal Strategy, Livestock Report Strategy, Feed Cost
+Hedge, Livestock Calendar Spread, Treasury Futures Long, Treasury Futures
+Short, 2-Year Treasury Futures, 5-Year Treasury Futures, 10-Year Treasury
+Futures, 30-Year Bond Futures, Ultra Bond Futures, Yield Curve Steepener,
+Yield Curve Flattener, 2s10s Futures Spread, 5s30s Futures Spread, Duration
+Hedge, Rate Cut Trade, Rate Hike Trade, FOMC Futures Strategy, CPI Futures
+Strategy, NFP Futures Strategy, Currency Futures Long, Currency Futures
+Short, Euro FX Futures, British Pound Futures, Japanese Yen Futures, Swiss
+Franc Futures, Canadian Dollar Futures, Australian Dollar Futures, Dollar
+Index Futures, FX Carry Futures, FX Breakout, FX Mean Reversion, Central
+Bank Futures Strategy, Interest Rate Differential Strategy, Bitcoin Futures
+Long, Bitcoin Futures Short, Micro Bitcoin Futures, Ether Futures, Micro
+Ether Futures, Crypto Futures Breakout, Crypto Futures Mean Reversion,
+Crypto Basis Trade, Spot/Futures Basis, Cash-and-Carry Crypto Futures,
+Perpetual Futures Funding Strategy, Crypto Calendar Spread, Volatility
+Futures, VIX Futures Long, VIX Futures Short, VIX Calendar Spread, VIX
+Contango Short Vol Strategy, VIX Backwardation Long Vol Strategy, Volatility
+Hedge, Equity Hedge With VIX Futures, Event Volatility Futures Strategy,
+Weather Futures, HDD Futures, CDD Futures, Temperature Hedge, Energy Demand
+Weather Hedge, Weather Derivatives Strategy, Hedging With Futures, Portfolio
+Hedge With ES, Portfolio Hedge With MES, Nasdaq Hedge With NQ, Nasdaq Hedge
+With MNQ, Commodity Producer Hedge, Commodity Consumer Hedge, Currency
+Hedge, Interest Rate Hedge, Inflation Hedge, Cross Hedge, Beta Hedge, Delta
+Hedge With Futures, Cash-and-Carry Arbitrage, Reverse Cash-and-Carry
+Arbitrage, Basis Trade, Basis Convergence Trade, Globex Session Breakout,
+Globex Session Fade, London Session Breakout, London Session Reversal, New
+York Open Breakout, New York Open Reversal, Power Hour Futures, End-of-Day
+Futures Rebalance, Overnight Futures Trend, Overnight Futures Mean
+Reversion, Asia Session Futures Strategy, Europe Session Futures Strategy,
+News Futures Strategy, Fed Day Futures Strategy, PPI Futures Strategy, ISM
+Futures Strategy, Retail Sales Futures Strategy, Treasury Auction Futures
+Strategy, Oil Inventory Futures Strategy, EIA Natural Gas Futures Strategy,
+OPEC Meeting Futures Strategy, Futures Scalping, One-Tick Scalping, Two-Tick
+Scalping, Order Flow Scalping, Momentum Scalping, Reversal Scalping, VWAP
+Scalping, Opening Range Scalping, Micro Pullback Scalping, Breakout
+Scalping, Liquidity Sweep Scalping, Market Maker Style Scalping,
+Algorithmic Futures Trend Following, Algorithmic Futures Mean Reversion,
+Algorithmic Futures Breakout, Statistical Arbitrage Futures, Machine
+Learning Futures Strategy, Reinforcement Learning Futures Strategy,
+Volatility Targeting Futures, Risk Parity Futures, Managed Futures CTA
+Strategy, Time-Series Momentum, Cross-Sectional Momentum, Trend-Following
+Basket, Commodity Momentum Basket, Macro Futures Basket, Long Call on
+Futures, Long Put on Futures, Short Call on Futures, Short Put on Futures,
+Covered Futures Call, Covered Futures Put, Protective Put on Futures,
+Protective Call on Futures, Bull Call Spread on Futures, Bull Put Spread on
+Futures, Bear Call Spread on Futures, Bear Put Spread on Futures, Debit
+Spread on Futures, Credit Spread on Futures, Vertical Spread on Futures,
+Long Straddle on Futures, Short Straddle on Futures, Long Strangle on
+Futures, Short Strangle on Futures, Iron Condor on Futures, Iron Butterfly
+on Futures, Call Butterfly on Futures, Put Butterfly on Futures, Calendar
+Spread on Futures Options, Diagonal Spread on Futures Options, Ratio Spread
+on Futures Options, Backspread on Futures Options, ES Options on Futures,
+MES Options on Futures, NQ Options on Futures, MNQ Options on Futures, Crude
+Oil Options on Futures, Natural Gas Options on Futures, Gold Options on
+Futures, Silver Options on Futures, Copper Options on Futures, Corn Options
+on Futures, Soybean Options on Futures, Wheat Options on Futures, Treasury
+Options on Futures, Currency Options on Futures, Bitcoin Options on
+Futures, Ether Options on Futures, VIX Options on Futures, Futures Options
+Delta Hedge, Futures Options Gamma Scalping, Futures Options Vega Trade,
+Futures Options Theta Trade, Futures Options Skew Trade, Futures Options
+Volatility Crush, Futures Options Volatility Expansion, Futures Options
+Event Trade, Futures Options Report Trade, Futures Options Macro Event
+Trade
+
+</details>
+
+### Instrument universe
+
+Notes on which instruments to work with, as originally scoped:
+
+- **Core index ETFs**: SPY, QQQ, IWM, DIA
+- **Sector ETFs**: XLK, XLF, XLV, XLE, XLY, XLP, XLI, XLU, XLC, XLB, XLRE, SMH
+- **Macro ETFs**: TLT, HYG, LQD, UUP, GLD, SLV, USO
+- **Major stocks**: AAPL, MSFT, AMZN, META, GOOGL, NVDA, TSLA, AMD
+- **Leveraged/inverse ETFs**: TQQQ, SQQQ, SPXL, SPXS, SOXL, SOXS, UPRO, UVXY
+- **Futures**: /ES, /MES, /NQ, /MNQ, /RTY, /M2K, /YM, /MYM, /CL, /MCL, /GC,
+  /MGC, /ZN, /ZB
+- **Options underlyings**: SPY, QQQ, IWM, AAPL, MSFT, NVDA, TSLA, AMD, META,
+  AMZN, GOOGL, TLT, SMH, GLD, USO
+- Also noted: random gappers, small caps, low-float stocks, and meme stocks
+  as a distinct, higher-risk category of their own.
 
 ### Research workflow for a chosen candidate
 1. Write the rules out precisely first, in plain English, the same level of
