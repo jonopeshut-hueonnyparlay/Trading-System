@@ -176,6 +176,59 @@ fail safely (flat, not silently broken) and page you either way.
 
 ---
 
+## Strategy research track (runs in parallel, starting now)
+
+Finding and defining new strategy *candidates* doesn't require live capital
+or a finished pipeline, so this track can run alongside Phase 1-5 instead of
+waiting for them. What it feeds into is Phase 7 — a candidate only actually
+gets built as a module, and only actually goes live, once it clears the same
+gate the core strategy is going through right now. **No new module gets
+implemented until one of these is picked and confirmed.**
+
+### What makes a candidate worth researching
+- **Mechanical, not discretionary** — expressible as explicit if/then rules,
+  the same way VWAP Pullback Long is. If it can't be written as precise
+  conditions, it can't be coded without repainting or ambiguity.
+- **Diversifying, not duplicating** — ideally trades a different time-of-day,
+  a different market condition (trend vs. range), or the opposite direction,
+  so it doesn't just win and lose on the same days as the existing module for
+  the same reason. A second copy of the same edge isn't diversification.
+- **Frequent enough to validate** — needs enough historical occurrences to
+  get a meaningful sample size in a reasonable testing window (the core
+  strategy's ~1 trade/3-4 days is already on the sparse side).
+
+### Candidate ideas for SPY/QQQ intraday (unranked, pick one to start)
+- **Short-side mirror of VWAP Pullback Long** — the same trend/impulse/
+  pullback/confirmation logic, inverted for downtrends. Lowest-effort
+  candidate since it reuses almost the entire existing framework and rule
+  structure; good complement on bearish/red days where the long-only module
+  never fires.
+- **Opening Range Breakout (ORB)** — trade a breakout of the first N-minute
+  range (commonly 5 or 15) in the breakout direction. Trades right at the
+  open (9:30-9:45), a window the current strategy explicitly excludes.
+- **VWAP Reversion / Fade** — the mean-reversion counterpart to the current
+  trend-continuation approach: fade price back toward VWAP when it's
+  extended too far without a clean trend behind it.
+- **Power Hour momentum** — trend-continuation in the last hour of the
+  session (3:00-4:00 PM ET), a completely different time-of-day exposure
+  than the current 9:45-11:15 window.
+- **Gap fill / gap-and-go** — rules based on overnight gap behavior in the
+  first few minutes of the session.
+
+### Research workflow for a chosen candidate
+1. Write the rules out precisely first, in plain English, the same level of
+   detail the original VWAP Pullback Long spec had — entry, stop, target,
+   sizing, session window, invalidation, daily limits.
+2. Build it as its own module following the `FUTURE STRATEGY MODULES`
+   pattern in the script (own id, own state, own inputs) — never touching
+   the existing module's code.
+3. Run it through the *same* Phase 1 validation checklist independently.
+4. Only after it passes on its own, evaluate it *combined* with the existing
+   module (shared account, shared single-position slot) to confirm it
+   doesn't just cannibalize the existing module's trades.
+
+---
+
 ## Cross-cutting, all phases
 
 - **Secrets**: broker API keys and webhook secrets never belong in this
