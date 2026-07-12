@@ -143,21 +143,150 @@ fail safely (flat, not silently broken) and page you either way.
 
 ## Phase 6 — Small real-money pilot
 
-- [ ] **Check Pattern Day Trader (PDT) rules before starting.** In the US,
-      a margin account under $25,000 equity is restricted to 3 day trades
-      per rolling 5 business days. This strategy's "max 2 trades per day"
-      cap can easily exceed that limit across a week — with a ~$5,000
-      account this is a real, concrete blocker, not a formality. Resolve it
-      (larger account, cash account with T+1 settlement awareness, a
-      broker/account structure that fits) before sending a single live
-      order — this needs to happen before Phase 6, not be discovered during it.
-- [ ] Start with real capital meaningfully smaller than you're ultimately
-      willing to risk, specifically so early pipeline mistakes are cheap.
+- [ ] **PDT (Pattern Day Trader) rule status: not applicable if trading
+      futures.** PDT is a FINRA rule specific to equities/ETF margin
+      accounts (under $25,000 equity → capped at 3 day trades per rolling
+      5 business days). It does **not** apply to futures. This was flagged
+      as a real blocker back when SPY/QQQ equities were the target
+      instrument; now that the plan targets futures (ES/MES, NQ/MNQ) via a
+      prop firm, it's a non-issue — noted here so it doesn't linger as a
+      false blocker. (It would still apply if this strategy is ever traded
+      on equities directly in a personal margin account under $25K.)
+- [ ] **Pick a prop firm using the research below** — automation policy is
+      the hard gate; get it in writing from the firm before paying for an
+      evaluation.
+- [ ] Start with real capital (or the smallest available evaluation
+      account) meaningfully smaller than you're ultimately willing to risk,
+      specifically so early pipeline mistakes are cheap.
 - [ ] Define kill criteria *in writing, before starting*: e.g. "stop if
       realized slippage exceeds assumption by 3x," "stop if any duplicate
       order occurs," "stop if daily loss limit is breached without the
       system halting itself." Decide these when you're calm, not mid-drawdown.
 - [ ] Run live and forward-paper in parallel for comparison.
+
+---
+
+## Prop firm research (feeds Phase 6 firm selection)
+
+Deep research pass across the major algo-relevant futures-funded prop
+firms, cross-checked against each firm's own terms/help-center content
+wherever reachable (not just aggregator/listicle blogs — two of the
+findings below directly contradict what listicles reported first).
+**Automation policy is the hard gate**: a firm can be great on every other
+dimension and still be a non-starter if it bans the kind of unattended
+execution this system is built around.
+
+### Automation policy by firm
+
+**Allow real automation on funded accounts:**
+- **Bulenox** — cleanest allowance found; automated trading, EAs, bots,
+  and trade copiers explicitly permitted on all account types including
+  the funded Master Account. No active-supervision language found. Bulenox
+  doesn't provide support for third-party tools if something breaks
+  technically, but doesn't restrict their use either.
+- **FundedNext Futures** — allowed on both the Challenge Phase and funded
+  accounts, with two conditions: each bot/EA must run a "distinct
+  strategy" (an anti-correlation rule — see below), and a $300,000 max
+  allocation limit per strategy across accounts.
+- **Tradeify** — bots/algorithms allowed if sole-owned (not shared or sold
+  to other traders), not shared across firms, and not high-frequency.
+- **Topstep** — explicitly allows full automation on both evaluation and
+  funded accounts, **but** automation must run from a personal device —
+  no VPS, no cloud bots. This is a real architectural conflict with a
+  24/7-monitored-server design (Phase 5) unless execution runs on a
+  machine that's kept on, not a hosted server.
+- **MyFundedFutures** — TradingView webhook bridges are *explicitly* named
+  as permitted (as of a late-2025 policy update), but the trader must
+  "actively supervise" positions and oversee entries/exits/cancellations;
+  fully autonomous, unsupervised bots are explicitly banned. No daily loss
+  limit (a real differentiator). Doesn't natively support TradingView —
+  needs NinjaTrader/Tradovate/Rithmic plus a bridge.
+- **BluSky** — allows bots with similar active-oversight language; $500
+  daily loss limit (tight relative to the other firms here); must flatten
+  positions 15 minutes before market close.
+
+  *Nuance on the two "active supervision" firms above*: this may not
+  actually conflict with the Phase 5 design, which already calls for
+  monitoring, alerting, and a kill switch — i.e. a human genuinely in the
+  loop, just not manually clicking every trade. Whether that satisfies
+  "actively supervised" needs to be confirmed with the firm directly, but
+  it isn't automatically disqualifying the way the firms below are.
+
+**Prohibited — ruled out:**
+- **Apex Trader Funding** — blanket ban on automation, explicit and
+  unambiguous, on *all* account types ("any type of hands-off,
+  set-and-forget, or set-and-walk-away trading... is strictly
+  prohibited"). Notable because Apex otherwise scores well in general
+  prop-firm comparisons (cheap evals, good multi-account economics) — it's
+  specifically the automation ban that rules it out here.
+- **TradeDay** — prohibits third-party trading bots/Automated Trading
+  Systems and doesn't expose their Tradovate API for connecting one.
+- **Phidias** — semi-automated tools only, with a requirement that the
+  trader "actively monitors and manually adjusts all trades" — not
+  compatible with unattended execution.
+- **Lucid Trading** — prohibits bots, EAs, and VPNs outright.
+
+### Corrections caught during deeper research
+Two of the above (TradeDay, Phidias) were initially reported as
+algo-friendly by aggregator/listicle sources, and turned out to be wrong
+on checking the firms' own terms — TradeDay's own site explicitly
+prohibits third-party bots, and Phidias's own rules require manual
+adjustment of every trade. **Listicle rankings of prop firms are not
+reliable specifically for automation policy** — always verify against the
+firm's own terms/help-center article, not a comparison blog, before
+relying on a policy characterization.
+
+### Cross-cutting risk: correlated-strategy detection
+Tradeify, FundedNext, and (per one source) E8 Funding all monitor for
+correlated P&L across multiple accounts running an identical, publicly
+known strategy — flagged accounts can be terminated as a group. This is
+independent of which firm is chosen and is a reason to keep some
+strategy-specific tuning rather than running an off-the-shelf, widely
+shared version of a public strategy pattern.
+
+### Numeric rules captured (subject to change — verify before committing)
+- **Topstep**: $50K/$100K/$150K accounts, $49/$99/$199 per month. Daily
+  loss limit $1,000/$2,000/$3,000. Trailing EOD drawdown $2,000/$3,000/
+  $4,500, locks once it reaches starting balance. 90/10 split (100% of
+  first $10K for pre-2026 accounts).
+- **Bulenox**: $25K-$250K accounts. Daily loss limits $500-$4,500 by size
+  (or a no-daily-limit real-time trailing option). 40% consistency rule
+  applies only at Master/payout stage. 90/10 split after first $10K.
+- **MyFundedFutures**: no daily loss limit on any plan. 50% consistency
+  rule during evaluation only, not on funded accounts.
+- **FundedNext Futures**: $25K/$50K/$100K accounts at $79/$129/$279. 40%
+  consistency rule during evaluation. Trailing drawdown becomes static
+  once it reaches the initial balance.
+- **Tradeify**: $25K-$150K across Growth/Select/Lightning account types,
+  $99-$796 depending on type/size. Daily loss limits $1,000-$3,750 by
+  size/type. Consistency rules 20-40% depending on account type, removed
+  entirely once funded on Select accounts.
+- **BluSky**: $500 daily loss limit. Up to 90% profit split, no funded
+  activation fee, same-day activation after passing.
+- **Apex** (ruled out on automation, noted for completeness): rules
+  overhauled March 2026 — choice of trailing-intraday or EOD drawdown, 50%
+  consistency rule.
+
+### What this changes about firm selection
+Round-one research (before this deeper pass) suggested MyFundedFutures as
+the strongest candidate. With the fuller picture: **Bulenox and
+FundedNext Futures are now the stronger fits** — cleaner automation
+allowances, without MyFundedFutures' "active supervision" ambiguity or
+Topstep's personal-device constraint. Apex is confirmed out despite
+scoring well on general prop-firm comparisons.
+
+### Confidence level and final step before committing capital
+This is cross-checked against each firm's own terms/help-center content
+wherever reachable, with two real contradictions from aggregator sources
+caught and corrected in the process — about as far as web research can
+responsibly take this. It cannot confirm how these policies are enforced
+in practice, catch a silent policy change after this research was done, or
+substitute for a direct answer from the firm. **Before paying for an
+evaluation**, get written confirmation from the chosen firm's
+support/compliance team that the specific setup planned (TradingView →
+webhook bridge → Tradovate/NinjaTrader, running with monitoring/alerting
+but not manual per-trade confirmation) is compliant on their funded
+accounts — treat everything above as "very likely accurate," not certain.
 
 ---
 
