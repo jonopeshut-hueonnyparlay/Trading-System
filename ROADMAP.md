@@ -526,6 +526,69 @@ Notes on which instruments to work with, as originally scoped:
 - Also noted: random gappers, small caps, low-float stocks, and meme stocks
   as a distinct, higher-risk category of their own.
 
+### Instrument universe ranked for prop-trading-firm fit
+
+Same lens as the strategy ranking: the dominant modern prop-firm model
+(Topstep, Apex, MyFundedFutures, Bulenox, TradeDay, etc.) is **futures-only**,
+so "can you actually trade this at the firm" is the primary axis here, not
+just general trading-instrument quality.
+
+**Tier S — best fit** (flagship instruments most funded accounts default to)
+1. ES / MES (S&P 500 futures) — the single most-used instrument across
+   funded futures accounts.
+2. NQ / MNQ (Nasdaq 100 futures) — second most popular, higher volatility,
+   day-trader favorite.
+3. CL / MCL (Crude Oil) — very liquid, high volatility; watch for EIA
+   inventory reports if the firm bans news-window trading.
+4. GC / MGC (Gold) — solid liquidity, works for both trend and reversion.
+
+**Tier A — strong fit** (directly tradable, less dominant but solid)
+5. YM / MYM (Dow futures) — popular, lower volatility than ES/NQ.
+6. RTY / M2K (Russell 2000 futures) — choppier, more volatile, less
+   consistent trend behavior.
+7. ZN (10-Year Treasury Note futures) — lower vol, good for a rates-focused
+   strategy.
+8. ZB (30-Year Treasury Bond futures) — similar, more duration-sensitive.
+
+**Tier B — indirect fit** (not tradable *at* futures-funded firms, but high
+research value since their futures equivalents are)
+9. SPY → maps to ES/MES — best for backtesting/research (deep TradingView
+   history), then translate the logic to ES/MES to trade it funded.
+10. QQQ → maps to NQ/MNQ
+11. IWM → maps to RTY/M2K
+12. DIA → maps to YM/MYM
+13. GLD → maps to GC/MGC
+14. TLT → maps loosely to ZN/ZB duration exposure
+15. USO → weaker proxy for CL specifically, due to roll/contango tracking
+    issues
+
+**Tier C — poor/no fit for futures-funded firms**
+16. Sector ETFs without a futures analog (XLF, XLV, XLY, XLP, XLI, XLU, XLC,
+    XLB, XLRE) — no realistic path into the futures-prop model.
+17. SMH — no standalone futures contract, though heavily correlated to NQ.
+18. Individual mega-cap stocks (AAPL, MSFT, AMZN, META, GOOGL, NVDA, TSLA,
+    AMD) — not accessible at futures-funded firms at all; only relevant for
+    a different, harder-to-access equities-focused prop shop.
+19. UUP, SLV — no direct retail futures-prop path for the ETF itself
+    (currency futures like 6E/6B and silver futures SI exist at some firms,
+    but these specific ETFs don't map into that account type).
+
+**Tier D — weakest fit**
+20. Leveraged/inverse ETFs (TQQQ, SQQQ, SPXL, SPXS, SOXL, SOXS, UPRO, UVXY)
+    — not offered at futures-funded firms *and* structurally poor building
+    blocks for any consistent-risk approach (daily rebalancing decay,
+    amplified noise, unreliable technical levels).
+21. Random gappers, small caps, low-float, meme stocks — worst fit:
+    unreliable liquidity/spreads, extreme volatility, very hard to satisfy a
+    fixed daily-loss/consistency rule, and often explicitly restricted by
+    prop firms/equities desks.
+
+**Practical takeaway:** Tier S strategy (VWAP Pullback Long) × Tier S ticker
+(ES/MES or NQ/MNQ) is the highest-value next step if prop-firm funding is
+the goal — build/validate on SPY or QQQ as already underway (best data,
+easiest iteration), then port the same logic to ES/MES or NQ/MNQ before
+targeting an evaluation.
+
 ### Research workflow for a chosen candidate
 1. Write the rules out precisely first, in plain English, the same level of
    detail the original VWAP Pullback Long spec had — entry, stop, target,
