@@ -538,6 +538,71 @@ Notes on which instruments to work with, as originally scoped:
    module (shared account, shared single-position slot) to confirm it
    doesn't just cannibalize the existing module's trades.
 
+### Ranked for prop-trading-firm fit
+
+Ranking assumes the dominant *modern* prop-firm model: futures evaluation/
+funded-account firms (Topstep, Apex, MyFundedFutures, Bulenox, TradeDay,
+etc.), not old-school equity prop shops. These firms trade futures almost
+exclusively, enforce hard daily-loss and consistency rules, usually ban
+trading through high-impact news, and often prohibit arbitrage/hedging
+outright in their terms — all of which reshuffles the ranking versus a
+pure backtestability view.
+
+**Tier S — best fit**
+1. Opening-range breakout/breakdown/retest/failure (incl. Initial Balance) —
+   the single most common funded-futures strategy family (ES/NQ ORB
+   especially); clean rules, resolves fast, fits the daily structure firms
+   evaluate on.
+2. VWAP pullback/reclaim/rejection — the module already built here.
+   Mechanical, defined-risk, translates directly to ES/NQ/MES/MNQ.
+3. Moving-average pullback / trend-day continuation — classic funded-account
+   trend-day approach.
+4. Level breakout-and-retest (HOD/LOD, prior day high/low, overnight
+   high/low, Globex high/low) — standard futures day-trading structure.
+5. Session-based strategies (Globex/London/NY-open/Power-Hour) — maps
+   directly onto how funded futures accounts are structured around sessions.
+
+**Tier A — strong fit**
+6. Mean reversion/fade family (VWAP mean reversion, RSI OB/OS, extension
+   fade, exhaustion reversal, stop-hunt/liquidity-sweep reversal, trap
+   fades) — mechanical, defined-risk, lower win rate so needs more
+   discipline, but tradeable.
+7. Gap fade/fill/hold/reclaim, gap-and-go — works well on futures overnight
+   gaps, fits daily structure.
+8. Market/volume profile edges (value area, POC, single prints,
+   balanced/trend day) — strong fit specifically because most funded-futures
+   platforms provide this data natively (better tooling access here than a
+   bare TradingView setup), though harder to make fully mechanical.
+9. Order flow/tape reading (absorption, iceberg, cumulative delta,
+   footprint/imbalance, DOM scalping) — same tooling advantage, but harder
+   to encode as strict backtestable rules — more of a trained-eye skill.
+
+**Tier B — workable with adaptation**
+10. Relative value/momentum (relative strength, ES-vs-NQ divergence, breadth
+    confirmation) — better used as a *filter* layered onto a Tier S strategy
+    than as a standalone one.
+11. Futures spreads (calendar, intercommodity, crack/crush/spark) — many
+    funded accounts don't margin/permit multi-leg spread execution the same
+    way single-instrument directional trades work; often restricted.
+12. Macro event-driven (FOMC, CPI, NFP, inventory reports) — actively
+    conflicts with a very common prop-firm rule against trading through
+    high-impact news windows.
+
+**Tier C — poor fit / usually incompatible**
+13. Options structures (all of them) — most futures-funded firms don't offer
+    options at all; where options-prop programs exist, undefined-risk
+    structures are typically banned outright, and even defined-risk
+    multi-leg options don't suit the fast daily-loss-limit model.
+14. Arbitrage/stat-arb/merger-arb/latency arb — commonly explicitly
+    prohibited in funded-account terms.
+15. Weather/commodity fundamental/report strategies — too infrequent for the
+    consistency/activity requirements most evaluations impose.
+
+**Practical takeaway:** VWAP Pullback Long is already Tier S in spirit — it
+mainly needs to be pointed at futures (ES/MES or NQ/MNQ) instead of SPY/QQQ,
+and checked against whatever specific daily-loss/consistency rules the
+target firm uses, rather than starting a new strategy from scratch.
+
 ---
 
 ## Cross-cutting, all phases
