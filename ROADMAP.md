@@ -666,6 +666,136 @@ mainly needs to be pointed at futures (ES/MES or NQ/MNQ) instead of SPY/QQQ,
 and checked against whatever specific daily-loss/consistency rules the
 target firm uses, rather than starting a new strategy from scratch.
 
+### Ranked by funding chances when run as an algo
+
+A different question from "fit" above: given this runs *unattended through a
+real algo pipeline* (TradingView alert → webhook → broker, realistically
+1-5+ seconds of latency), which combos actually survive an evaluation.
+Four extra factors drive this ranking:
+
+- **Evaluation risk math** — many small, consistent wins survives a
+  daily-loss/max-drawdown limit far better than a few big ones; one bad
+  trade shouldn't be able to breach the limit.
+- **Trade frequency vs. evaluation timeline** — too sparse and you're
+  exposed to calendar-time risk longer before hitting the profit target.
+- **Tail risk of the edge itself** — trend/breakout stops are clean; fades
+  against a real trend day can blow out.
+- **Algo latency tolerance** — the decisive factor. Anything depending on
+  sub-second reaction (DOM/tape/footprint scalping) is fundamentally
+  mismatched to a webhook-based pipeline: by the time the order fires, the
+  microstructure signal that triggered it is gone. Wide, level-based setups
+  don't care about a few seconds of lag; scalping setups die from it.
+
+One more honest factor: **only VWAP Pullback Long has actual backtest data
+behind it right now.** Everything else here is a reasoned prediction, not
+evidence — that gap is itself a real funding-chances advantage.
+
+**Tier S — highest funding chances via algo**
+1. VWAP Pullback Long/Short × ES/MES — already validated, small bounded risk
+   per trade, ES's clean intraday VWAP behavior, entries/stops wide enough
+   that a few seconds of latency doesn't matter.
+2. Opening Range Breakout × ES/MES — near-daily setup frequency compresses
+   the evaluation timeline, level-based logic tolerates latency well.
+3. Opening Range Breakout × NQ/MNQ — bigger average move helps hit the
+   profit target faster, but needs tighter sizing (favor MNQ) since bigger
+   swings also risk the daily-loss limit faster.
+4. VWAP Pullback Long/Short × NQ/MNQ — same edge as #1, ranked slightly
+   lower purely because NQ's volatility demands more careful sizing.
+5. Level breakout-and-retest × ES/MES or NQ/MNQ — simple, robust to
+   latency, moderate-high frequency.
+
+**Tier A — strong funding chances**
+6. Trend-day/MA pullback continuation × NQ/MNQ — good expectancy on trend
+   days, but trend days aren't every day, so the equity curve is lumpier.
+7. Trend-day/MA pullback continuation × ES/MES — same logic, smaller
+   average win since ES trends less violently.
+8. Opening Range Breakout × CL/MCL — good vol/frequency, but crude's
+   EIA-report sensitivity needs an explicit news-blackout rule if the firm
+   bans news-window trading.
+9. Opening Range Breakout × GC/MGC — similar, gold's macro-news sensitivity
+   is the main knock.
+10. Gap fade/fill × ES/MES or NQ/MNQ — solid edge, but gap frequency alone
+    is too low to complete an evaluation quickly on its own.
+
+**Tier B — moderate funding chances**
+11. VWAP pullback/level breakout × YM/MYM or RTY/M2K — same core logic, but
+    YM's lower volatility slows target completion and RTY's choppiness
+    lowers win rate — both extend risk exposure time.
+12. Mean reversion/fade × RTY/M2K — RTY's choppiness suits fades, but
+    occasional violent trend days create real tail risk against a
+    daily-loss limit.
+13. Mean reversion/fade × ES/MES or NQ/MNQ — same tail-risk issue, worse
+    here since index futures trend harder and longer than RTY.
+14. Session-based (Globex/Power-Hour) setups — workable, but once-a-day
+    frequency slows evaluation completion without adding safety.
+
+**Tier C — lowest funding chances (algo-latency mismatch)**
+15. Market/volume profile edges — hard to encode as clean, unambiguous
+    rules without excess false signals, which directly hurts the
+    consistency evaluations demand.
+16. Order flow/tape reading (absorption, footprint, DOM scalping) — worst
+    fit for this specific pipeline, any instrument: depends on sub-second
+    reaction a webhook-driven bot can't deliver.
+
+**Practical takeaway:** the honest answer to "best funding chances via
+algo" is still #1 — VWAP Pullback Long on ES/MES — specifically because
+it's the only combo with real evidence behind it *and* it sits in the
+latency-tolerant, small-consistent-risk category evaluations reward.
+Everything else here is a reasonable bet, not a tested one, until it goes
+through the same Phase 1 validation.
+
+### Active shortlist — elimination pass
+
+After three rankings (prop-fit for strategies, prop-fit for instruments,
+funding chances via algo), the following is cut from active consideration.
+**Nothing is deleted** — the full original list stays intact below as an
+archive — but these categories are no longer being pursued unless something
+changes (new tooling, a different target firm type, etc.):
+
+- **All options structures** — futures-funded firms don't offer options;
+  incompatible with the fast day-trading model even where they do.
+- **All arbitrage / stat-arb / latency-arb / merger-arb / convertible-arb**
+  — commonly prohibited outright by prop-firm terms.
+- **Order flow / tape reading / DOM / footprint / absorption / iceberg** —
+  fundamentally mismatched to a webhook-latency execution pipeline.
+- **Market/volume profile edges** — too hard to encode as clean,
+  unambiguous, backtestable rules for now.
+- **Macro event-driven (FOMC/CPI/NFP/inventory)** — conflicts with common
+  news-trading bans.
+- **Futures spreads (calendar/intercommodity/crack/crush/spark)** — often
+  not permitted/margined the same way at funded accounts.
+- **Weather/commodity fundamental/report strategies** — too infrequent,
+  needs data not on hand.
+- **Leveraged/inverse ETFs, individual mega-cap stocks, sector ETFs
+  without a futures analog, random gappers/small caps/low-float/meme
+  names** — not tradable at futures-funded firms, and structurally poor
+  risk profiles besides.
+
+**What's left — the active shortlist:**
+
+*Strategies (7 families, in priority order):*
+1. VWAP Pullback (built) + short-side mirror
+2. Opening Range Breakout family (breakout/breakdown/retest/failure,
+   Initial Balance)
+3. Moving-average / trend-day continuation
+4. Level breakout-and-retest (HOD/LOD, prior day high/low, overnight
+   high/low, Globex high/low)
+5. Gap fade/fill/hold/reclaim, gap-and-go
+6. Mean reversion/fade family (VWAP mean reversion, RSI OB/OS, extension
+   fade, stop-hunt reversal) — lower priority, tail-risk flag from the
+   funding-chances ranking
+7. Session-based (Globex/London/NY-open/Power-Hour) — lower priority,
+   lower trade frequency
+
+*Instruments:*
+- **Trade-at-the-firm**: ES/MES, NQ/MNQ, CL/MCL, GC/MGC (primary);
+  YM/MYM, RTY/M2K, ZN, ZB (secondary)
+- **Research-proxy only** (best backtest data available now; translate to
+  the matching future before going live): SPY, QQQ, IWM, DIA, GLD, TLT, USO
+
+That's the actual working backlog going forward — 7 strategy families ×
+~11 instruments, down from 400+ names and 20+ tickers.
+
 ---
 
 ## Cross-cutting, all phases
